@@ -35,5 +35,5 @@ export const SERVICE_IDS = Object.keys(SERVICES);
 
 export const APP_NAME = "ai-helper";
 export const CLI_NAME = "aih";
-export const VERSION = "1.0.0";
+export const VERSION = "1.0.1";
 
