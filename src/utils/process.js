@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { openSync, closeSync, appendFileSync } from "node:fs";
+import { openSync, appendFileSync } from "node:fs";
 import { ensureDir, getLogsDir } from "./path.js";
 
 /**
@@ -95,6 +95,46 @@ export function openBrowser(url) {
 }
 
 /**
+ * Finds PIDs of processes currently listening on the specified TCP ports.
+ * @param {number[]} ports
+ * @returns {Promise<number[]>}
+ */
+export async function findPidsListeningOnPorts(ports) {
+  if (!ports || ports.length === 0) return [];
+  const matchedPids = new Set();
+
+  if (process.platform === "win32") {
+    try {
+      const portList = ports.join(", ");
+      const script = `Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -in ${portList} } | Select-Object -ExpandProperty OwningProcess`;
+      const res = await execCommand("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script]);
+      const lines = res.stdout.trim().split(/\r?\n/);
+      for (const line of lines) {
+        const pid = parseInt(line.trim(), 10);
+        if (pid && !isNaN(pid) && pid > 0) {
+          matchedPids.add(pid);
+        }
+      }
+    } catch {}
+  } else {
+    try {
+      for (const port of ports) {
+        const res = await execCommand("lsof", ["-t", `-i:${port}`, "-sTCP:LISTEN"]);
+        const lines = res.stdout.trim().split(/\r?\n/);
+        for (const line of lines) {
+          const pid = parseInt(line.trim(), 10);
+          if (pid && !isNaN(pid) && pid > 0) {
+            matchedPids.add(pid);
+          }
+        }
+      }
+    } catch {}
+  }
+
+  return Array.from(matchedPids);
+}
+
+/**
  * Kills a process and its entire child process tree.
  * @param {number} pid
  * @returns {Promise<{ success: boolean; message: string }>}
@@ -181,28 +221,16 @@ export function spawnDetachedProcess(command, logFilePath, options) {
 
   const fd = openSync(logFilePath, "a");
 
-  let proc;
-  if (process.platform === "win32") {
-    proc = spawn("cmd.exe", ["/c", command], {
-      detached: true,
-      stdio: ["ignore", fd, fd],
-      env: { ...process.env, ...options?.env },
-      cwd: options?.cwd,
-      windowsHide: true,
-    });
-  } else {
-    proc = spawn("sh", ["-c", command], {
-      detached: true,
-      stdio: ["ignore", fd, fd],
-      env: { ...process.env, ...options?.env },
-      cwd: options?.cwd,
-    });
-  }
+  const proc = spawn(command, [], {
+    shell: true,
+    detached: true,
+    stdio: ["ignore", fd, fd],
+    env: { ...process.env, ...options?.env },
+    cwd: options?.cwd,
+    windowsHide: true,
+  });
 
   proc.unref();
-  try {
-    closeSync(fd);
-  } catch {}
 
   return { pid: proc.pid };
 }
@@ -270,7 +298,7 @@ export async function discoverRunningProcesses() {
         const ports = pidToPorts[pid] || [];
 
         // 1. pxpipe
-        if (cmd.includes("pxpipe-proxy") || (cmd.toLowerCase().includes("pxpipe") && !cmd.includes("@agentmemory"))) {
+        if (cmd.includes("pxpipe-proxy") || (cmd.toLowerCase().includes("pxpipe") && !cmd.includes("agentmemory"))) {
           if (!discovered.pxpipe || (item.Name && item.Name.toLowerCase() === "node.exe" && cmd.includes("cli.js"))) {
             const webPort = ports.find(p => p > 1000 && p < 65000) || (discovered.pxpipe?.port);
             discovered.pxpipe = {
@@ -297,16 +325,20 @@ export async function discoverRunningProcesses() {
           }
         }
 
-        // 3. agentmemory
+        // 3. agentmemory (daemon / iii-engine only, strictly exclude MCP stdio shims)
+        const isMcpShim = cmd.includes("agentmemory-mcp") || cmd.includes("@agentmemory/mcp") || cmd.includes("agentmemory mcp");
+
         if (
-          cmd.includes("@agentmemory/agentmemory") ||
-          cmd.includes("agentmemory\\dist\\cli.mjs") ||
-          cmd.includes("agentmemory/dist/cli.mjs") ||
-          cmd.includes("iii-config.yaml") ||
-          (cmd.includes("agentmemory") && !cmd.includes("@agentmemory/mcp"))
+          !isMcpShim &&
+          (cmd.includes("@agentmemory/agentmemory") ||
+            cmd.includes("agentmemory\\dist\\cli.mjs") ||
+            cmd.includes("agentmemory/dist/cli.mjs") ||
+            cmd.includes("iii-config.yaml") ||
+            cmd.includes("iii.exe") ||
+            (cmd.includes("agentmemory") && !cmd.includes("mcp")))
         ) {
           const webPort = ports.find(p => p === 3113 || p === 43210 || (p > 1000 && p < 65000));
-          if (!discovered.agentmemory || cmd.includes("agentmemory/agentmemory")) {
+          if (!discovered.agentmemory || cmd.includes("agentmemory/agentmemory") || cmd.includes("dist\\cli.mjs")) {
             discovered.agentmemory = {
               pid,
               command: cmd,
@@ -353,10 +385,14 @@ export async function discoverRunningProcesses() {
         if (cmd.includes("ocx start") || cmd.includes("ocx.mjs") || cmd.includes("opencodex")) {
           if (!discovered.ocx) discovered.ocx = { pid, command: cmd, url: "http://localhost:10100" };
         }
+
+        const isMcpShim = cmd.includes("agentmemory-mcp") || cmd.includes("@agentmemory/mcp") || cmd.includes("agentmemory mcp");
         if (
-          cmd.includes("@agentmemory/agentmemory") ||
-          cmd.includes("iii-config.yaml") ||
-          (cmd.includes("agentmemory") && !cmd.includes("@agentmemory/mcp"))
+          !isMcpShim &&
+          (cmd.includes("@agentmemory/agentmemory") ||
+            cmd.includes("iii-config.yaml") ||
+            cmd.includes("iii") ||
+            (cmd.includes("agentmemory") && !cmd.includes("mcp")))
         ) {
           if (!discovered.agentmemory) discovered.agentmemory = { pid, command: cmd, url: "http://localhost:3113" };
         }

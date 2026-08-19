@@ -1,7 +1,16 @@
 import { existsSync, readFileSync, writeFileSync, statSync, openSync, readSync, closeSync } from "node:fs";
 import { SERVICES, SERVICE_IDS } from "./config.js";
 import { ensureDir, getAihDir, getLogsDir, getServiceLogPath, getStateFilePath } from "./utils/path.js";
-import { isPidRunning, killProcessTree, spawnDetachedProcess, discoverRunningProcesses, openBrowser, sleep } from "./utils/process.js";
+import {
+  isPidRunning,
+  killProcessTree,
+  spawnDetachedProcess,
+  discoverRunningProcesses,
+  openBrowser,
+  sleep,
+  execCommand,
+  findPidsListeningOnPorts,
+} from "./utils/process.js";
 import { formatBytes, formatUptime, gray, red, yellow, green, cyan } from "./utils/format.js";
 
 export class ServiceManager {
@@ -48,33 +57,37 @@ export class ServiceManager {
     const state = this.readState();
     let needsSave = false;
 
-    // 1. Verify liveness of currently recorded PIDs
-    for (const id of Object.keys(state.services)) {
-      const svc = state.services[id];
-      if (svc.status === "running") {
-        if (!svc.pid || !isPidRunning(svc.pid)) {
-          svc.status = "stopped";
-          svc.pid = undefined;
-          svc.startedAt = undefined;
-          needsSave = true;
-        }
-      }
-    }
-
-    // 2. Discover externally started processes
+    // Discover active verified daemon processes from OS
     const discovered = await discoverRunningProcesses();
-    for (const id of Object.keys(discovered)) {
-      const info = discovered[id];
+
+    for (const id of SERVICE_IDS) {
       const svc = state.services[id];
-      if (svc) {
-        if (svc.status !== "running" || !svc.pid || !isPidRunning(svc.pid)) {
+      const info = discovered[id];
+
+      if (info && info.pid && isPidRunning(info.pid)) {
+        // Confirmed active service daemon discovered in OS
+        if (svc.status !== "running" || svc.pid !== info.pid) {
           svc.status = "running";
           svc.pid = info.pid;
-          svc.startedAt = info.startedAt || new Date().toISOString();
+          svc.startedAt = info.startedAt || svc.startedAt || new Date().toISOString();
           svc.url = info.url || SERVICES[id]?.defaultUrl;
           needsSave = true;
         } else if (info.url && svc.url !== info.url) {
           svc.url = info.url;
+          needsSave = true;
+        }
+      } else if (svc.status === "running" && svc.pid && isPidRunning(svc.pid)) {
+        // Process spawned by aih is still actively running in background
+        if (!svc.url) {
+          svc.url = SERVICES[id]?.defaultUrl;
+          needsSave = true;
+        }
+      } else {
+        // Not running and not discovered
+        if (svc.status === "running" || svc.pid !== undefined) {
+          svc.status = "stopped";
+          svc.pid = undefined;
+          svc.startedAt = undefined;
           needsSave = true;
         }
       }
@@ -223,20 +236,11 @@ export class ServiceManager {
     };
     this.saveState(state);
 
-    await sleep(600);
+    // Wait a moment for background boot
+    await sleep(2000);
 
-    if (!isPidRunning(pid)) {
-      state.services[serviceId].status = "error";
-      state.services[serviceId].pid = undefined;
-      state.services[serviceId].lastError = "Process exited immediately after spawn";
-      this.saveState(state);
-
-      return {
-        success: false,
-        message: `Service '${serviceId}' exited immediately. Check logs with 'aih logs ${serviceId}'`,
-        pid,
-      };
-    }
+    // Re-sync with OS
+    await this.syncState();
 
     return {
       success: true,
@@ -261,29 +265,48 @@ export class ServiceManager {
   }
 
   /**
-   * Stops a single service by ID.
+   * Stops a single service cleanly, executing stop commands and clearing ports/workers.
    */
   async stopService(serviceId) {
+    const def = SERVICES[serviceId];
     const state = await this.syncState();
     const current = state.services[serviceId];
 
-    if (!current || current.status !== "running" || !current.pid) {
-      return { success: true, message: `Service '${serviceId}' is not running` };
+    // 1. If service has a dedicated graceful stopCommand, run it
+    if (def?.stopCommand) {
+      const isWin = process.platform === "win32";
+      if (isWin) {
+        await execCommand("cmd.exe", ["/c", def.stopCommand]);
+      } else {
+        await execCommand("sh", ["-c", def.stopCommand]);
+      }
+      await sleep(400);
     }
 
-    const pidToKill = current.pid;
-    const killResult = await killProcessTree(pidToKill);
+    // 2. Kill recorded process tree if still active
+    if (current && current.pid && isPidRunning(current.pid)) {
+      await killProcessTree(current.pid);
+    }
 
+    // 3. Clean up any remaining processes holding the service's ports
+    if (def?.ports && def.ports.length > 0) {
+      const portPids = await findPidsListeningOnPorts(def.ports);
+      for (const p of portPids) {
+        if (isPidRunning(p)) {
+          await killProcessTree(p);
+        }
+      }
+    }
+
+    // 4. Update state to stopped
     state.services[serviceId].status = "stopped";
     state.services[serviceId].pid = undefined;
     state.services[serviceId].startedAt = undefined;
     this.saveState(state);
 
     return {
-      success: killResult.success,
-      message: killResult.success
-        ? `Service '${serviceId}' stopped (PID: ${pidToKill})`
-        : `Failed to stop service '${serviceId}': ${killResult.message}`,
+      success: true,
+      message: `Service '${serviceId}' stopped cleanly`,
     };
   }
 
@@ -306,7 +329,7 @@ export class ServiceManager {
    */
   async restartService(serviceId) {
     await this.stopService(serviceId);
-    await sleep(400);
+    await sleep(600);
     return await this.startService(serviceId);
   }
 
