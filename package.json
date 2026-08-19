@@ -1,0 +1,49 @@
+{
+  "name": "@drakonkat/ai-helper",
+  "version": "1.0.0",
+  "description": "Zero-config background service manager, auto-discovery daemon & dashboard launcher for AI agent ecosystems (pxpipe, ocx, agentmemory)",
+  "main": "src/index.js",
+  "module": "src/index.js",
+  "type": "module",
+  "bin": {
+    "aih": "./bin/cli.js",
+    "ai-helper": "./bin/cli.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md",
+    "LICENSE",
+    "ARCHITECTURE.md",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "start": "node ./bin/cli.js",
+    "dev": "node ./bin/cli.js",
+    "test": "bun test",
+    "build": "bun build --compile --minify --outfile dist/aih.exe src/index.js",
+    "install-bin": "bun run scripts/install-bin.js"
+  },
+  "keywords": [
+    "cli",
+    "ai",
+    "agent",
+    "pxpipe",
+    "ocx",
+    "agentmemory",
+    "mcp",
+    "npx",
+    "service-manager",
+    "dashboard",
+    "developer-tools"
+  ],
+  "author": "Mauro",
+  "license": "MIT"
+}
+

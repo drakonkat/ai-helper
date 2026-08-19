@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test on ${{ matrix.os }} (${{ matrix.runtime }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        runtime: [bun, node-20]
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        if: matrix.runtime == 'bun'
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      - name: Setup Node.js
+        if: matrix.runtime != 'bun'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Run Tests (Bun)
+        if: matrix.runtime == 'bun'
+        run: bun test
+
+      - name: Run Smoke Test (Node)
+        if: matrix.runtime != 'bun'
+        run: node bin/cli.js --help
+
