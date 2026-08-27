@@ -6,8 +6,8 @@
   "module": "src/index.js",
   "type": "module",
   "bin": {
-    "aih": "./bin/cli.js",
-    "ai-helper": "./bin/cli.js"
+    "aih": "bin/cli.js",
+    "ai-helper": "bin/cli.js"
   },
   "files": [
     "bin",
@@ -23,6 +23,14 @@
   "publishConfig": {
     "access": "public"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/drakonkat/ai-helper.git"
+  },
+  "bugs": {
+    "url": "https://github.com/drakonkat/ai-helper/issues"
+  },
+  "homepage": "https://github.com/drakonkat/ai-helper#readme",
   "scripts": {
     "start": "node ./bin/cli.js",
     "dev": "node ./bin/cli.js",
