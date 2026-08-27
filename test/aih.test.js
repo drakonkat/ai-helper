@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { join } from "node:path";
 import { SERVICES, SERVICE_IDS, APP_NAME, CLI_NAME } from "../src/config.js";
 import { formatBytes, formatUptime, stripAnsi, renderTable, badgeStatus } from "../src/utils/format.js";
 import { getAihDir, getStateFilePath, getLogsDir, getServiceLogPath, getLocalBinDir, isLocalBinInPath } from "../src/utils/path.js";
@@ -32,7 +33,7 @@ describe("Path Utilities", () => {
   it("should resolve AIH home and state paths", () => {
     const aihDir = getAihDir();
     expect(aihDir).toContain(".aih");
-    expect(getStateFilePath()).toBe(`${aihDir}\\state.json` || `${aihDir}/state.json`);
+    expect(getStateFilePath()).toBe(join(aihDir, "state.json"));
     expect(getLogsDir()).toContain("logs");
     expect(getServiceLogPath("pxpipe")).toContain("pxpipe.log");
   });
