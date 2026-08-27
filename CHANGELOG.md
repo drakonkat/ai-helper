@@ -4,6 +4,15 @@ All notable changes to **`ai-helper` (`aih`)** are documented in this file.
 
 ---
 
+## [1.0.4] - 2026-08-27
+
+### 🐛 Bug Fixes
+- **Self Process CLI Exclusion**: Exclude current CLI process (`process.pid`) and `aih` CLI command patterns from OS process auto-discovery, preventing false-positive "already running" statuses during `aih start <service>`.
+- **Precise Process Matching**: Refine `pxpipe-proxy` matching patterns so general CLI arguments are not mistaken for the active service daemon.
+- **Post-Start Verification**: Verify actual service liveness after the startup grace period in `startService`, reporting startup failures accurately instead of declaring dead processes as running.
+
+---
+
 ## [1.0.2] - 2026-08-19
 
 ### 🐛 Bug Fixes
@@ -31,4 +40,3 @@ All notable changes to **`ai-helper` (`aih`)** are documented in this file.
 - **Unified Live Log Streaming**: Real-time log capture and streaming with `aih logs <service> -f`.
 - **Programmatic JSON API**: Added `--json` flag for IDE, agent, and pipeline integration.
 - **Cross-Runtime & NPX Ready**: Universal Node.js (>=18) and Bun support.
-

@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { SERVICES, SERVICE_IDS, APP_NAME, CLI_NAME } from "../src/config.js";
 import { formatBytes, formatUptime, stripAnsi, renderTable, badgeStatus } from "../src/utils/format.js";
 import { getAihDir, getStateFilePath, getLogsDir, getServiceLogPath, getLocalBinDir, isLocalBinInPath } from "../src/utils/path.js";
-import { isPidRunning } from "../src/utils/process.js";
+import { isPidRunning, discoverRunningProcesses } from "../src/utils/process.js";
 import { ServiceManager } from "../src/manager.js";
 
 describe("Configuration", () => {
@@ -107,6 +107,13 @@ describe("Process Utilities", () => {
     expect(isPidRunning(-1)).toBe(false);
     expect(isPidRunning(9999999)).toBe(false);
   });
+
+  it("should not discover the current process PID as a service", async () => {
+    const discovered = await discoverRunningProcesses();
+    for (const id of Object.keys(discovered)) {
+      expect(discovered[id].pid).not.toBe(process.pid);
+    }
+  });
 });
 
 describe("Service Manager", () => {
@@ -140,4 +147,3 @@ describe("Service Manager", () => {
     expect(res.message).toContain("Unknown service");
   }, 15000);
 });
-

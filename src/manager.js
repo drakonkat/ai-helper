@@ -234,19 +234,28 @@ export class ServiceManager {
       startedAt: new Date().toISOString(),
       url: def.defaultUrl,
     };
-    this.saveState(state);
+   this.saveState(state);
 
-    // Wait a moment for background boot
-    await sleep(2000);
+   // Wait a moment for background boot
+   await sleep(2000);
 
-    // Re-sync with OS
-    await this.syncState();
+   // Re-sync with OS
+    const updatedState = await this.syncState();
+    const updatedSvc = updatedState.services[serviceId];
+
+    if (!updatedSvc || updatedSvc.status !== "running" || !updatedSvc.pid || !isPidRunning(updatedSvc.pid)) {
+      return {
+        success: false,
+        message: `Service '${serviceId}' failed to start or exited immediately. Check logs with 'aih logs ${serviceId}'`,
+        pid,
+      };
+    }
 
     return {
       success: true,
-      message: `Service '${serviceId}' started successfully (PID: ${pid})`,
-      pid,
-      url: def.defaultUrl,
+      message: `Service '${serviceId}' started successfully (PID: ${updatedSvc.pid})`,
+      pid: updatedSvc.pid,
+      url: updatedSvc.url || def.defaultUrl,
     };
   }
 
@@ -400,4 +409,3 @@ export class ServiceManager {
 }
 
 export const manager = new ServiceManager();
-

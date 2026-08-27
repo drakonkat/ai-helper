@@ -241,14 +241,16 @@ export function spawnDetachedProcess(command, logFilePath, options) {
  */
 export async function discoverRunningProcesses() {
   const discovered = {};
+  const currentPid = process.pid;
 
   if (process.platform === "win32") {
     try {
       const script = `
         $procs = Get-CimInstance Win32_Process | Where-Object { 
+          $_.ProcessId -ne ${currentPid} -and 
           $_.CommandLine -and 
-          ($_.CommandLine -match 'pxpipe|ocx|agentmemory|iii') -and 
-          ($_.CommandLine -notmatch 'ai-helper|Get-CimInstance|Where-Object|Select-Object')
+          ($_.CommandLine -match 'pxpipe-proxy|ocx|agentmemory|iii') -and 
+          ($_.CommandLine -notmatch 'ai-helper|\\baih(\\.exe)?\\b|bin\\\\cli\\.js|Get-CimInstance|Where-Object|Select-Object')
         } | Select-Object ProcessId, ParentProcessId, Name, CommandLine, CreationDate
 
         $ports = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Select-Object LocalPort, OwningProcess
@@ -280,7 +282,12 @@ export async function discoverRunningProcesses() {
       for (const item of procList) {
         const cmd = item.CommandLine || "";
         const pid = item.ProcessId;
-        if (!pid || !isPidRunning(pid)) continue;
+        if (!pid || pid === currentPid || !isPidRunning(pid)) continue;
+
+        // Skip any ai-helper / aih CLI executions
+        if (cmd.includes("bin/cli.js") || cmd.includes("bin\\cli.js") || /\baih(\.exe)?\b/i.test(cmd)) {
+          continue;
+        }
 
         let startedAt;
         if (item.CreationDate) {
@@ -298,7 +305,7 @@ export async function discoverRunningProcesses() {
         const ports = pidToPorts[pid] || [];
 
         // 1. pxpipe
-        if (cmd.includes("pxpipe-proxy") || (cmd.toLowerCase().includes("pxpipe") && !cmd.includes("agentmemory"))) {
+        if (cmd.includes("pxpipe-proxy")) {
           if (!discovered.pxpipe || (item.Name && item.Name.toLowerCase() === "node.exe" && cmd.includes("cli.js"))) {
             const webPort = ports.find(p => p > 1000 && p < 65000) || (discovered.pxpipe?.port);
             discovered.pxpipe = {
@@ -312,7 +319,7 @@ export async function discoverRunningProcesses() {
         }
 
         // 2. ocx
-        if (cmd.includes("ocx.mjs") || cmd.includes("opencodex") || cmd.includes("ocx start")) {
+        if (cmd.includes("ocx.mjs") || cmd.includes("opencodex") || (cmd.includes("ocx start") && !cmd.includes("aih "))) {
           const webPort = ports.find(p => p === 10100 || (p > 1000 && p < 65000));
           if (!discovered.ocx || cmd.includes("ocx.mjs start")) {
             discovered.ocx = {
@@ -335,7 +342,7 @@ export async function discoverRunningProcesses() {
             cmd.includes("agentmemory/dist/cli.mjs") ||
             cmd.includes("iii-config.yaml") ||
             cmd.includes("iii.exe") ||
-            (cmd.includes("agentmemory") && !cmd.includes("mcp")))
+            (cmd.includes("agentmemory") && !cmd.includes("mcp") && !cmd.includes("aih ")))
         ) {
           const webPort = ports.find(p => p === 3113 || p === 43210 || (p > 1000 && p < 65000));
           if (!discovered.agentmemory || cmd.includes("agentmemory/agentmemory") || cmd.includes("dist\\cli.mjs")) {
@@ -372,14 +379,16 @@ export async function discoverRunningProcesses() {
 
       for (const line of lines) {
         const trimmed = line.trim();
-        if (!trimmed || trimmed.includes("ps -eo") || trimmed.includes("ai-helper")) continue;
+        if (!trimmed || trimmed.includes("ps -eo") || trimmed.includes("ai-helper") || /\baih\b/.test(trimmed)) continue;
 
         const parts = trimmed.split(/\s+/);
         const pid = parseInt(parts[0], 10);
         const cmd = parts.slice(1).join(" ");
-        if (!pid || !isPidRunning(pid)) continue;
+        if (!pid || pid === currentPid || !isPidRunning(pid)) continue;
 
-        if (cmd.includes("pxpipe-proxy") || (cmd.includes("pxpipe") && !cmd.includes("@agentmemory"))) {
+        if (cmd.includes("bin/cli.js") || cmd.includes("bin/aih")) continue;
+
+        if (cmd.includes("pxpipe-proxy")) {
           if (!discovered.pxpipe) discovered.pxpipe = { pid, command: cmd, url: "http://localhost:47821" };
         }
         if (cmd.includes("ocx start") || cmd.includes("ocx.mjs") || cmd.includes("opencodex")) {
@@ -402,4 +411,3 @@ export async function discoverRunningProcesses() {
 
   return discovered;
 }
-
