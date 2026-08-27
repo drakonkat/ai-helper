@@ -24,6 +24,7 @@ function printHelp() {
 
 ${bold("COMMANDS:")}
   ${yellow("status")}, ${yellow("ps")}              Show status, PID, uptime, and web dashboard URLs
+  ${yellow("status -ui")}              Interactive live dashboard: manage services and watch the AI pipeline
   ${yellow("open")}, ${yellow("dash")} [services...]  Open web dashboard(s) directly in your default browser
   ${yellow("start")}, ${yellow("up")} [services...]   Start all or specified services (pxpipe, ocx, agentmemory, headroom)
   ${yellow("stop")}, ${yellow("down")} [services...]   Stop all or specified services
@@ -43,6 +44,7 @@ ${bold("OPTIONS:")}
   ${gray("-n, --lines <num>")}     Number of log lines to show (default: 50)
   ${gray("-f, --follow")}          Follow log output in real-time
   ${gray("--json")}                Output results in JSON format
+  ${gray("-ui, --ui")}             Open the interactive dashboard (status only, requires a TTY)
 
 ${bold("EXAMPLES:")}
   ${dim("$")} ${cyan("npx ai-helper")} status
@@ -134,6 +136,7 @@ export async function main() {
 
   let jsonOutput = false;
   let follow = false;
+  let uiMode = false;
   let lines = 50;
   const positionalArgs = [];
 
@@ -141,6 +144,8 @@ export async function main() {
     const arg = rawArgs[i];
     if (arg === "--json") {
       jsonOutput = true;
+    } else if (arg === "-ui" || arg === "--ui") {
+      uiMode = true;
     } else if (arg === "-f" || arg === "--follow") {
       follow = true;
     } else if (arg === "-n" || arg === "--lines") {
@@ -172,6 +177,14 @@ export async function main() {
     case "ps":
     case "ls":
     case "list": {
+      // Interactive mode needs a real terminal: piping or redirecting falls
+      // back to the plain table so scripts keep working.
+      if (uiMode && !jsonOutput && process.stdout.isTTY && process.stdin.isTTY) {
+        const { runDashboard } = await import("./tui.js");
+        await runDashboard();
+        return;
+      }
+
       const statuses = await manager.getStatus(targets.length > 0 ? targets : undefined);
 
       if (jsonOutput) {
