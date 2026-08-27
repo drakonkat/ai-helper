@@ -4,6 +4,13 @@ All notable changes to **`ai-helper` (`aih`)** are documented in this file.
 
 ---
 
+## [1.1.1] - 2026-08-27
+
+### Updates
+- Added TUI updates and fixed the agentMemory dashboard flow.
+
+---
+
 ## [1.1.0] - 2026-08-27
 
 ### 🚀 New Features
