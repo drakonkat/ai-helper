@@ -2,8 +2,16 @@ import { describe, expect, it } from "bun:test";
 import { mkdtempSync, writeFileSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { parseProm, diffRates, tailJsonl, baseUrl, probeChain } from "../src/utils/metrics.js";
+import {
+  parseProm,
+  diffRates,
+  tailJsonl,
+  baseUrl,
+  probeChain,
+  readSavingsBreakdown,
+} from "../src/utils/metrics.js";
 import { splitKeys } from "../src/tui.js";
+import { resolveAgentmemoryViewerPort } from "../src/utils/process.js";
 
 const SAMPLE = [
   "# HELP headroom_requests_total Total number of requests",
@@ -125,5 +133,78 @@ describe("splitKeys", () => {
     expect(splitKeys("\x1b[A")).toEqual(["\x1b[A"]);
     expect(splitKeys("\x1b[Bs")).toEqual(["\x1b[B", "s"]);
     expect(splitKeys("qx")).toEqual(["q", "x"]);
+  });
+});
+
+describe("readSavingsBreakdown", () => {
+  const write = (name, contents) => {
+    const dir = mkdtempSync(join(tmpdir(), "aih-savings-"));
+    const file = join(dir, name);
+    writeFileSync(file, typeof contents === "string" ? contents : JSON.stringify(contents), "utf-8");
+    return file;
+  };
+
+  it("splits the savings into compression and provider cache reuse", () => {
+    const file = write("state.json", {
+      contribution: {
+        tokens_submitted: 90,
+        raw_without_headroom: 100,
+        tokens_saved: { compression: 4, cache_reads: 6, total: 10 },
+      },
+    });
+
+    expect(readSavingsBreakdown(file)).toEqual({
+      submitted: 90,
+      compression: 4,
+      cacheReads: 6,
+      total: 10,
+      ratio: 0.1,
+    });
+  });
+
+  it("derives the total when the file omits it", () => {
+    const file = write("state.json", {
+      contribution: { tokens_submitted: 100, tokens_saved: { compression: 10, cache_reads: 30 } },
+    });
+
+    expect(readSavingsBreakdown(file).total).toBe(40);
+  });
+
+  it("returns a null ratio instead of dividing by zero on a fresh install", () => {
+    const file = write("state.json", {
+      contribution: { tokens_submitted: 0, tokens_saved: { compression: 0, cache_reads: 0, total: 0 } },
+    });
+
+    expect(readSavingsBreakdown(file).ratio).toBeNull();
+  });
+
+  it("returns null for a missing, malformed, or unrelated file", () => {
+    expect(readSavingsBreakdown(join(tmpdir(), "aih-does-not-exist.json"))).toBeNull();
+    expect(readSavingsBreakdown(write("bad.json", "not json{"))).toBeNull();
+    expect(readSavingsBreakdown(write("other.json", { pid: 1 }))).toBeNull();
+  });
+});
+
+describe("resolveAgentmemoryViewerPort", () => {
+  it("picks the viewer, not the engine port that is bound on every interface", () => {
+    expect(resolveAgentmemoryViewerPort([49134, 3111, 3112])).toBe(3113);
+  });
+
+  it("recovers the viewer from the engine port alone", () => {
+    expect(resolveAgentmemoryViewerPort([49134])).toBe(3113);
+    expect(resolveAgentmemoryViewerPort([50023])).toBe(4002);
+  });
+
+  it("follows a relocated instance instead of assuming the default", () => {
+    expect(resolveAgentmemoryViewerPort([4000, 4001, 50023])).toBe(4002);
+  });
+
+  it("derives the viewer from the REST anchor when the engine is not visible", () => {
+    expect(resolveAgentmemoryViewerPort([3111])).toBe(3113);
+  });
+
+  it("falls back to the default when no port is visible", () => {
+    expect(resolveAgentmemoryViewerPort([])).toBe(3113);
+    expect(resolveAgentmemoryViewerPort(undefined)).toBe(3113);
   });
 });

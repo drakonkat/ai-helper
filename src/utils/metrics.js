@@ -1,10 +1,67 @@
-import { existsSync, statSync, openSync, readSync, closeSync } from "node:fs";
+import { existsSync, statSync, openSync, readSync, closeSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 /**
  * On first read we only look at the tail of the events file, which is
  * append-only and already several MB on an active machine.
  */
 const INITIAL_TAIL_BYTES = 64 * 1024;
+
+/**
+ * Headroom keeps a rolling breakdown of where the token savings came from in
+ * subscription_state.json. This is the only place in the ecosystem that splits
+ * the total into compression vs provider cache reads: the per-request event log
+ * only ever reports source "proxy", and neither pxpipe nor agentmemory publish
+ * savings counters of their own.
+ * @returns {string}
+ */
+export function getSavingsBreakdownPath() {
+  const custom = process.env.HEADROOM_HOME;
+  const base = custom && custom.trim().length > 0 ? custom : join(homedir(), ".headroom");
+  return join(base, "subscription_state.json");
+}
+
+/**
+ * Reads the savings breakdown. Returns null whenever the file is missing or
+ * malformed so the panel degrades instead of breaking the render loop.
+ * @param {string} [path]
+ * @returns {{ submitted: number, compression: number, cacheReads: number, total: number, ratio: number | null } | null}
+ */
+export function readSavingsBreakdown(path) {
+  const file = path || getSavingsBreakdownPath();
+  if (!existsSync(file)) return null;
+
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(file, "utf-8"));
+  } catch {
+    return null;
+  }
+
+  const contribution = parsed?.contribution;
+  const saved = contribution?.tokens_saved;
+  if (!saved || typeof saved !== "object") return null;
+
+  const numeric = value => (Number.isFinite(Number(value)) ? Number(value) : 0);
+
+  const compression = numeric(saved.compression);
+  const cacheReads = numeric(saved.cache_reads);
+  const total = numeric(saved.total) || compression + cacheReads;
+  const submitted = numeric(contribution.tokens_submitted);
+
+  // The raw baseline is what would have been sent without any optimisation, so
+  // it is the only honest denominator for a savings percentage.
+  const baseline = numeric(contribution.raw_without_headroom) || submitted + total;
+
+  return {
+    submitted,
+    compression,
+    cacheReads,
+    total,
+    ratio: baseline > 0 ? total / baseline : null,
+  };
+}
 
 /**
  * Parses a Prometheus text exposition payload into a flat name -> number map.

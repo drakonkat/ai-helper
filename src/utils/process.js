@@ -235,6 +235,35 @@ export function spawnDetachedProcess(command, logFilePath, options) {
   return { pid: proc.pid };
 }
 
+// agentmemory binds a quartet derived from one anchor port N:
+//   REST N | streams N+1 | viewer N+2 | engine N+46023
+const AGENTMEMORY_ENGINE_OFFSET = 46023;
+const AGENTMEMORY_VIEWER_OFFSET = 2;
+const AGENTMEMORY_DEFAULT_VIEWER = 3113;
+
+/**
+ * Resolves the agentmemory viewer port from the ports a process is listening on.
+ * The engine port is the one that binds 0.0.0.0 and is usually discovered first,
+ * but the only browsable dashboard is the viewer, so derive it from the anchor.
+ * @param {number[]} ports
+ * @returns {number}
+ */
+export function resolveAgentmemoryViewerPort(ports) {
+  const candidates = (ports || []).filter(p => Number.isFinite(p) && p > 0);
+  if (candidates.length === 0) return AGENTMEMORY_DEFAULT_VIEWER;
+
+  // The engine port is the most reliable marker: it is the only one above the
+  // offset and always anchor + 46023, so it recovers the anchor by itself. This
+  // matters because the engine binds 0.0.0.0 while the rest of the quartet is
+  // loopback-only, so the engine is sometimes the only port we get to see.
+  const engine = candidates.find(p => p > AGENTMEMORY_ENGINE_OFFSET);
+  if (engine) return engine - AGENTMEMORY_ENGINE_OFFSET + AGENTMEMORY_VIEWER_OFFSET;
+
+  // Otherwise the lowest port is the REST anchor: REST is always bound, so the
+  // smallest one we can see is the base of the quartet.
+  return Math.min(...candidates) + AGENTMEMORY_VIEWER_OFFSET;
+}
+
 /**
  * Scans the OS process table and listening ports to discover active services and their URLs.
  * @returns {Promise<Record<string, { pid: number; command: string; startedAt?: string; url?: string }>>}
@@ -344,14 +373,17 @@ export async function discoverRunningProcesses() {
             cmd.includes("iii.exe") ||
             (cmd.includes("agentmemory") && !cmd.includes("mcp") && !cmd.includes("aih ")))
         ) {
-          const webPort = ports.find(p => p === 3113 || p === 43210 || (p > 1000 && p < 65000));
+          // agentmemory opens a port quartet from one anchor N: REST N, streams N+1,
+          // viewer N+2, engine N+46023. Only the viewer is a dashboard, so never point
+          // the URL at the engine port even though it is the one usually listening.
+          const viewerPort = resolveAgentmemoryViewerPort(ports);
          if (!discovered.agentmemory || cmd.includes("agentmemory/agentmemory") || cmd.includes("dist\\cli.mjs")) {
            discovered.agentmemory = {
              pid,
              command: cmd,
              startedAt,
-             port: webPort || 3113,
-             url: `http://localhost:${webPort || 3113}`,
+             port: viewerPort,
+             url: `http://localhost:${viewerPort}`,
            };
          }
        }
@@ -380,8 +412,10 @@ export async function discoverRunningProcesses() {
          if (ports.includes(10100) && discovered.ocx) {
            discovered.ocx.url = "http://localhost:10100";
          }
-         if (ports.includes(3113) && discovered.agentmemory) {
-           discovered.agentmemory.url = "http://localhost:3113";
+         if (discovered.agentmemory && p.ProcessId === discovered.agentmemory.pid) {
+           const viewerPort = resolveAgentmemoryViewerPort(ports);
+           discovered.agentmemory.port = viewerPort;
+           discovered.agentmemory.url = `http://localhost:${viewerPort}`;
          }
           if (ports.includes(8787) && discovered.headroom) {
             discovered.headroom.url = "http://localhost:8787/dashboard";

@@ -18,7 +18,15 @@ import {
   yellow,
 } from "./utils/format.js";
 import { killProcessTree, openBrowser } from "./utils/process.js";
-import { baseUrl, diffRates, fetchText, parseProm, probeChain, tailJsonl } from "./utils/metrics.js";
+import {
+  baseUrl,
+  diffRates,
+  fetchText,
+  parseProm,
+  probeChain,
+  readSavingsBreakdown,
+  tailJsonl,
+} from "./utils/metrics.js";
 
 const TICK_MS = 1000;
 const MAX_EVENTS = 200;
@@ -129,6 +137,7 @@ export class Dashboard {
     this.eventsOffset = undefined;
     this.eventsFile = getEventsFilePath();
     this.eventsFileSeen = false;
+    this.savings = null;
     this.selected = 0;
     this.status = "";
     this.busy = false;
@@ -182,6 +191,8 @@ export class Dashboard {
       if (tail.events.length > 0) {
         this.events = this.events.concat(tail.events).slice(-MAX_EVENTS);
       }
+
+      this.savings = readSavingsBreakdown();
     } catch (err) {
       this.status = red(`Refresh error: ${err?.message || err}`);
     } finally {
@@ -275,6 +286,21 @@ export class Dashboard {
     lines.push("");
 
     lines.push(bold("STREAM RICHIESTE") + dim("  " + this.eventsFile));
+
+    // Every event in the stream is source "proxy": headroom is the only service
+    // that reports per-request savings. The split below is the one place that
+    // says how much came from compression versus provider cache reuse.
+    if (this.savings) {
+      const sv = this.savings;
+      const savingsCells = [
+        `${dim("risparmio")} ${green(bold(num(sv.total)))}`,
+        `${dim("compress")} ${bold(num(sv.compression))}`,
+        `${dim("cache")} ${bold(num(sv.cacheReads))}`,
+        `${dim("inviati")} ${bold(num(sv.submitted))}`,
+        `${dim("efficienza")} ${green(bold(pct(sv.ratio)))}`,
+      ];
+      lines.push("  " + savingsCells.join(dim("  .  ")));
+    }
 
     const footerLines = 3;
     const slots = Math.max(1, height - lines.length - footerLines);
