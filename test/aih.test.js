@@ -12,11 +12,12 @@ describe("Configuration", () => {
     expect(CLI_NAME).toBe("aih");
   });
 
-  it("should define the three core services: pxpipe, ocx, agentmemory", () => {
+  it("should define the core services: pxpipe, ocx, agentmemory, headroom", () => {
     expect(SERVICE_IDS).toContain("pxpipe");
     expect(SERVICE_IDS).toContain("ocx");
     expect(SERVICE_IDS).toContain("agentmemory");
-    expect(SERVICE_IDS.length).toBe(3);
+    expect(SERVICE_IDS).toContain("headroom");
+    expect(SERVICE_IDS.length).toBe(4);
   });
 
   it("should define valid commands and dashboard URLs for all services", () => {
@@ -26,6 +27,8 @@ describe("Configuration", () => {
     expect(SERVICES.ocx.defaultUrl).toBe("http://localhost:10100");
     expect(SERVICES.agentmemory.command).toBe("npx @agentmemory/agentmemory");
     expect(SERVICES.agentmemory.defaultUrl).toBe("http://localhost:3113");
+    expect(SERVICES.headroom.command).toBe("headroom proxy");
+    expect(SERVICES.headroom.defaultUrl).toBe("http://localhost:8787/dashboard");
   });
 });
 
@@ -126,15 +129,17 @@ describe("Service Manager", () => {
     expect(state.services.pxpipe).toBeDefined();
     expect(state.services.ocx).toBeDefined();
     expect(state.services.agentmemory).toBeDefined();
+    expect(state.services.headroom).toBeDefined();
   });
 
   it("should get status list with URLs for all services", async () => {
     const statuses = await mgr.getStatus();
-    expect(statuses.length).toBe(3);
+    expect(statuses.length).toBe(4);
     const ids = statuses.map(s => s.id);
     expect(ids).toContain("pxpipe");
     expect(ids).toContain("ocx");
     expect(ids).toContain("agentmemory");
+    expect(ids).toContain("headroom");
 
     for (const svc of statuses) {
       expect(svc.url).toBeDefined();

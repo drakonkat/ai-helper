@@ -4,6 +4,14 @@ All notable changes to **`ai-helper` (`aih`)** are documented in this file.
 
 ---
 
+## [1.1.0] - 2026-08-27
+
+### 🚀 New Features
+- **Headroom Service Integration**: Added full background service management, live status, logs, and dashboard launching for `headroom` (`headroom proxy` on port `8787` with dashboard at `http://localhost:8787/dashboard`).
+- **Cross-Platform Auto-Discovery**: Automatic discovery of externally launched `headroom` proxy processes via OS process table queries and TCP port 8787 listeners.
+
+---
+
 ## [1.0.4] - 2026-08-27
 
 ### 🐛 Bug Fixes

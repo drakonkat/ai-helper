@@ -25,7 +25,7 @@ function printHelp() {
 ${bold("COMMANDS:")}
   ${yellow("status")}, ${yellow("ps")}              Show status, PID, uptime, and web dashboard URLs
   ${yellow("open")}, ${yellow("dash")} [services...]  Open web dashboard(s) directly in your default browser
-  ${yellow("start")}, ${yellow("up")} [services...]   Start all or specified services (pxpipe, ocx, agentmemory)
+  ${yellow("start")}, ${yellow("up")} [services...]   Start all or specified services (pxpipe, ocx, agentmemory, headroom)
   ${yellow("stop")}, ${yellow("down")} [services...]   Stop all or specified services
   ${yellow("restart")} [services...]      Restart all or specified services
   ${yellow("logs")} <service> [-n 50] [-f]  View or stream live logs for a service
@@ -323,4 +323,3 @@ main().catch(err => {
   console.error(red(`[aih] Fatal error: ${err?.message || err}`));
   process.exit(1);
 });
-

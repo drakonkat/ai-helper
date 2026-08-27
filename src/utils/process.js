@@ -246,12 +246,12 @@ export async function discoverRunningProcesses() {
   if (process.platform === "win32") {
     try {
       const script = `
-        $procs = Get-CimInstance Win32_Process | Where-Object { 
-          $_.ProcessId -ne ${currentPid} -and 
-          $_.CommandLine -and 
-          ($_.CommandLine -match 'pxpipe-proxy|ocx|agentmemory|iii') -and 
-          ($_.CommandLine -notmatch 'ai-helper|\\baih(\\.exe)?\\b|bin\\\\cli\\.js|Get-CimInstance|Where-Object|Select-Object')
-        } | Select-Object ProcessId, ParentProcessId, Name, CommandLine, CreationDate
+       $procs = Get-CimInstance Win32_Process | Where-Object { 
+         $_.ProcessId -ne ${currentPid} -and 
+         $_.CommandLine -and 
+          ($_.CommandLine -match 'pxpipe-proxy|ocx|agentmemory|iii|headroom') -and 
+         ($_.CommandLine -notmatch 'ai-helper|\\baih(\\.exe)?\\b|bin\\\\cli\\.js|Get-CimInstance|Where-Object|Select-Object')
+       } | Select-Object ProcessId, ParentProcessId, Name, CommandLine, CreationDate
 
         $ports = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Select-Object LocalPort, OwningProcess
 
@@ -345,32 +345,49 @@ export async function discoverRunningProcesses() {
             (cmd.includes("agentmemory") && !cmd.includes("mcp") && !cmd.includes("aih ")))
         ) {
           const webPort = ports.find(p => p === 3113 || p === 43210 || (p > 1000 && p < 65000));
-          if (!discovered.agentmemory || cmd.includes("agentmemory/agentmemory") || cmd.includes("dist\\cli.mjs")) {
-            discovered.agentmemory = {
+         if (!discovered.agentmemory || cmd.includes("agentmemory/agentmemory") || cmd.includes("dist\\cli.mjs")) {
+           discovered.agentmemory = {
+             pid,
+             command: cmd,
+             startedAt,
+             port: webPort || 3113,
+             url: `http://localhost:${webPort || 3113}`,
+           };
+         }
+       }
+
+        // 4. headroom
+        if (cmd.includes("headroom proxy") || (cmd.includes("headroom") && !cmd.includes("aih "))) {
+          const webPort = ports.find(p => p === 8787 || (p > 1000 && p < 65000));
+          if (!discovered.headroom || cmd.includes("headroom proxy")) {
+            discovered.headroom = {
               pid,
               command: cmd,
               startedAt,
-              port: webPort || 3113,
-              url: `http://localhost:${webPort || 3113}`,
+              port: webPort || 8787,
+              url: `http://localhost:${webPort || 8787}/dashboard`,
             };
           }
         }
-      }
+     }
 
-      for (const p of procList) {
-        const ports = pidToPorts[p.ProcessId] || [];
-        if (ports.length > 0) {
-          if (ports.includes(47821) && discovered.pxpipe) {
-            discovered.pxpipe.url = "http://localhost:47821";
+     for (const p of procList) {
+       const ports = pidToPorts[p.ProcessId] || [];
+       if (ports.length > 0) {
+         if (ports.includes(47821) && discovered.pxpipe) {
+           discovered.pxpipe.url = "http://localhost:47821";
+         }
+         if (ports.includes(10100) && discovered.ocx) {
+           discovered.ocx.url = "http://localhost:10100";
+         }
+         if (ports.includes(3113) && discovered.agentmemory) {
+           discovered.agentmemory.url = "http://localhost:3113";
+         }
+          if (ports.includes(8787) && discovered.headroom) {
+            discovered.headroom.url = "http://localhost:8787/dashboard";
           }
-          if (ports.includes(10100) && discovered.ocx) {
-            discovered.ocx.url = "http://localhost:10100";
-          }
-          if (ports.includes(3113) && discovered.agentmemory) {
-            discovered.agentmemory.url = "http://localhost:3113";
-          }
-        }
-      }
+       }
+     }
     } catch {}
   } else {
     try {
@@ -395,18 +412,22 @@ export async function discoverRunningProcesses() {
           if (!discovered.ocx) discovered.ocx = { pid, command: cmd, url: "http://localhost:10100" };
         }
 
-        const isMcpShim = cmd.includes("agentmemory-mcp") || cmd.includes("@agentmemory/mcp") || cmd.includes("agentmemory mcp");
-        if (
-          !isMcpShim &&
-          (cmd.includes("@agentmemory/agentmemory") ||
-            cmd.includes("iii-config.yaml") ||
-            cmd.includes("iii") ||
-            (cmd.includes("agentmemory") && !cmd.includes("mcp")))
-        ) {
-          if (!discovered.agentmemory) discovered.agentmemory = { pid, command: cmd, url: "http://localhost:3113" };
+       const isMcpShim = cmd.includes("agentmemory-mcp") || cmd.includes("@agentmemory/mcp") || cmd.includes("agentmemory mcp");
+       if (
+         !isMcpShim &&
+         (cmd.includes("@agentmemory/agentmemory") ||
+           cmd.includes("iii-config.yaml") ||
+           cmd.includes("iii") ||
+           (cmd.includes("agentmemory") && !cmd.includes("mcp")))
+       ) {
+         if (!discovered.agentmemory) discovered.agentmemory = { pid, command: cmd, url: "http://localhost:3113" };
+       }
+
+        if (cmd.includes("headroom proxy") || (cmd.includes("headroom") && !cmd.includes("aih "))) {
+          if (!discovered.headroom) discovered.headroom = { pid, command: cmd, url: "http://localhost:8787/dashboard" };
         }
-      }
-    } catch {}
+     }
+   } catch {}
   }
 
   return discovered;

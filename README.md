@@ -34,6 +34,7 @@ When building, testing, and collaborating with local AI agents, coding assistant
 1. **`pxpipe`**: LLM & MCP protocol reverse proxy bridge (`npx pxpipe-proxy`).
 2. **`ocx`**: OpenCode interpreter and execution daemon (`ocx start`).
 3. **`agentmemory`**: Persistent long-term agent memory server (`npx @agentmemory/agentmemory`).
+4. **`headroom`**: LLM context optimization & compression proxy (`headroom proxy`).
 
 Manually opening separate terminal tabs for each service is messy, clutters your workspace, and easily leads to orphaned background processes and blocked ports. 
 
@@ -82,6 +83,7 @@ bun add -g @drakonkat/ai-helper
 | **`pxpipe`** | `npx pxpipe-proxy` | [`http://localhost:47821`](http://localhost:47821) | AI LLM & MCP protocol reverse proxy bridge |
 | **`ocx`** | `ocx start` | [`http://localhost:10100`](http://localhost:10100) | OpenCode interpreter execution daemon |
 | **`agentmemory`** | `npx @agentmemory/agentmemory` | [`http://localhost:3113`](http://localhost:3113) | Persistent agent long-term memory server & viewer |
+| **`headroom`** | `headroom proxy` | [`http://localhost:8787/dashboard`](http://localhost:8787/dashboard) | Context optimization & LLM compression proxy |
 
 ---
 
@@ -284,4 +286,3 @@ bun run build
 ## 📄 License
 
 Distributed under the **MIT License**. See [LICENSE](LICENSE) for more information.
-

@@ -30,9 +30,18 @@ export const SERVICES = {
     command: "npx @agentmemory/agentmemory",
     stopCommand: "npx @agentmemory/agentmemory stop --force",
     description: "Long-term persistent agent memory service (@agentmemory/agentmemory)",
-    defaultPort: 3113,
-    defaultUrl: "http://localhost:3113",
-    ports: [3111, 3112, 3113, 49134],
+   defaultPort: 3113,
+   defaultUrl: "http://localhost:3113",
+   ports: [3111, 3112, 3113, 49134],
+ },
+  headroom: {
+    id: "headroom",
+    name: "headroom",
+    command: "headroom proxy",
+    description: "Context optimization & LLM proxy (headroom proxy)",
+    defaultPort: 8787,
+    defaultUrl: "http://localhost:8787/dashboard",
+    ports: [8787],
   },
 };
 
@@ -40,4 +49,4 @@ export const SERVICE_IDS = Object.keys(SERVICES);
 
 export const APP_NAME = "ai-helper";
 export const CLI_NAME = "aih";
-export const VERSION = "1.0.4";
+export const VERSION = "1.1.0";
