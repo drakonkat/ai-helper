@@ -1,6 +1,6 @@
 {
   "name": "@drakonkat/ai-helper",
-  "version": "1.1.1",
+  "version": "1.2.2",
   "description": "Zero-config background service manager, auto-discovery daemon & dashboard launcher for AI agent ecosystems (pxpipe, ocx, agentmemory, headroom)",
   "main": "src/index.js",
   "module": "src/index.js",
