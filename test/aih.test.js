@@ -102,6 +102,130 @@ describe("Update check", () => {
   });
 });
 
+describe("Service start CLI", () => {
+  it("starts default services in order and preserves explicit start options", async () => {
+    const original = { argv: process.argv, fetch: globalThis.fetch, log: console.log, start: manager.startService };
+    const calls = [];
+    let starting = false;
+    const defaultProxy = {
+      upstream: "http://127.0.0.1:10100/", listen: "http://127.0.0.1:10102", preset: "pxpipe",
+      models: "gpt-6-astra,google-antigravity/gemini-3.8*,anthropic/claude-fable*",
+    };
+    const customProxy = { upstream: "http://127.0.0.1:9000/", listen: "http://127.0.0.1:9001", preset: "rtk", models: "custom/*" };
+    try {
+      console.log = () => {};
+      globalThis.fetch = async () => ({ ok: true, json: async () => ({ version: VERSION }) });
+      manager.startService = async (id, options) => {
+        expect(starting).toBe(false);
+        starting = true;
+        calls.push([id, options]);
+        await Promise.resolve();
+        starting = false;
+        return { success: true, pid: 123 };
+      };
+      process.argv = ["node", "aih", "--help"];
+      const { main } = await import("../src/index.js");
+      for (const command of ["start", "up"]) {
+        for (const [args, expected] of [
+          [[], [["ocx", undefined], ["agentmemory", undefined], ["proxy", defaultProxy]]],
+          [["pxpipe", "headroom"], [["pxpipe", undefined], ["headroom", undefined]]],
+          [["proxy", customProxy.upstream, "--listen", customProxy.listen, "--preset", customProxy.preset, "--models", customProxy.models], [["proxy", customProxy]]],
+        ]) {
+          calls.length = 0;
+          process.argv = ["node", "aih", command, ...args, "--json"];
+          await main();
+          expect(calls).toEqual(expected);
+        }
+      }
+    } finally {
+      process.argv = original.argv;
+      globalThis.fetch = original.fetch;
+      console.log = original.log;
+      manager.startService = original.start;
+    }
+  });
+});
+
+describe("Managed service update CLI", () => {
+  async function runUpdate(args, update = async id => ({ success: true, message: `${id} updated`, version: "2.49.0" })) {
+    const original = { argv: process.argv, log: console.log, error: console.error, exitCode: process.exitCode, update: manager.updateService };
+    const stdout = [];
+    const stderr = [];
+    const calls = [];
+    try {
+      console.log = message => stdout.push(String(message));
+      console.error = message => stderr.push(String(message));
+      manager.updateService = async id => { calls.push(id); return update(id); };
+      process.argv = ["node", "aih", "--help"];
+      const { main } = await import("../src/index.js");
+      stdout.length = 0;
+      process.exitCode = 0;
+      process.argv = ["node", "aih", ...args];
+      await main();
+      return { calls, stdout, stderr, exitCode: process.exitCode };
+    } finally {
+      process.argv = original.argv;
+      console.log = original.log;
+      console.error = original.error;
+      process.exitCode = original.exitCode;
+      manager.updateService = original.update;
+    }
+  }
+
+  it("supports both service-first and command-first updates with clean JSON", async () => {
+    for (const args of [["ocx", "update", "--json"], ["--json", "update", "ocx"]]) {
+      const result = await runUpdate(args);
+      expect(result.calls).toEqual(["ocx"]);
+      expect(result.stdout).toHaveLength(1);
+      expect(JSON.parse(result.stdout[0])).toEqual([{ id: "ocx", success: true, message: "ocx updated", version: "2.49.0" }]);
+      expect(result.stderr).toEqual([]);
+      expect(result.exitCode).toBe(0);
+    }
+  });
+
+  it("defaults to standard services only and deduplicates explicit targets", async () => {
+    const all = await runUpdate(["update", "--json"]);
+    expect(all.calls).toEqual(SERVICE_IDS);
+    expect(all.calls).not.toContain("proxy");
+    const selected = await runUpdate(["update", "ocx", "agentmemory", "ocx", "--json"]);
+    expect(selected.calls).toEqual(["ocx", "agentmemory"]);
+    expect(JSON.parse(selected.stdout[0]).map(r => r.id)).toEqual(selected.calls);
+  });
+
+  it("validates every target and all update options before any mutation", async () => {
+    for (const args of [
+      ["update", "ocx", "unknown"], ["update", "proxy"],
+      ["ocx", "update", "agentmemory"], ["unknown", "update"],
+      ["update", "--ocx"], ["update", "ocx", "--repo"],
+    ]) {
+      const result = await runUpdate([...args, "--json"]);
+      expect(result.calls).toEqual([]);
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout).toHaveLength(1);
+      expect(JSON.parse(result.stdout[0]).every(r => r.success === false)).toBe(true);
+      expect(result.stderr).toEqual([]);
+    }
+    const proxy = await runUpdate(["proxy", "update", "--json"]);
+    expect(JSON.parse(proxy.stdout[0])[0].message).toContain("ai-helper itself");
+  });
+
+  it("reports no-op, returned failures, and thrown errors while processing other targets", async () => {
+    const result = await runUpdate(["update", "ocx", "pxpipe", "headroom", "--json"], async id => {
+      if (id === "ocx") return { success: true, alreadyUpToDate: true, message: "Already current" };
+      if (id === "pxpipe") return { success: false, message: "Installer failed" };
+      throw new Error("Cannot resolve installer");
+    });
+    expect(result.calls).toEqual(["ocx", "pxpipe", "headroom"]);
+    expect(result.exitCode).toBe(1);
+    expect(JSON.parse(result.stdout[0])).toEqual([
+      { id: "ocx", success: true, alreadyUpToDate: true, message: "Already current" },
+      { id: "pxpipe", success: false, message: "Installer failed" },
+      { id: "headroom", success: false, message: "Cannot resolve installer" },
+    ]);
+    expect(result.stderr).toEqual([]);
+  });
+});
+
 describe("Configuration", () => {
   it("should have correct app and CLI names", () => {
     expect(APP_NAME).toBe("ai-helper");

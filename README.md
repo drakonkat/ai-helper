@@ -63,7 +63,7 @@ npx @drakonkat/ai-helper status
 # Open service web dashboards in your default browser
 npx @drakonkat/ai-helper open
 
-# Start all background services
+# Start ocx, agentmemory and the pxpipe proxy
 npx @drakonkat/ai-helper start
 ```
 
@@ -148,16 +148,62 @@ installed version. `UPDATE` shows `↑ <version>` for an available update,
 completed. Checks query npm/PyPI in the background every five minutes and after
 a service restart; they never install or update services.
 
-The `PIPELINE` panel separates current activity from Headroom's cumulative
-statistics (since its counters started). `Token risparmiati` is saved tokens /
-(input + saved); `Richieste cached` is cached requests / total requests, not a
-cost-saving percentage. `Durata media` is the cumulative mean request latency.
-Press **`d`** to toggle URLs, versions, token rates and metric definitions.
-Rates use the interval between samples, not streaming token-generation speed.
-Only explicit health checks show a service as `verificato`; a running process
-alone is not a health check, and the final upstream is not monitored.
-After a failed collection or five seconds without a sample, totals are marked
-as old and live activity/rates are hidden until collection recovers.
+Press **`u`** to update the selected service to the latest available release.
+The action checks the registry again, reports progress/results in the footer,
+and refreshes version information even for stopped services. Repeated action
+keys are ignored while an operation is in progress. Only services that were
+running are stopped and restarted; stopped services stay stopped.
+
+Both `PIPELINE` and `STREAM RICHIESTE` read the native AIH proxy snapshot,
+`~/.aih/proxy-stats.json` (`AIH_HOME` overrides the directory), not Headroom's
+metrics or savings event log. `PIPELINE` shows recorded requests, changed requests,
+preset errors, estimated token savings and each stage's application/measurement
+counts. `elab/s` measures preset processing between successful samples, not all
+proxy traffic or token-generation speed. Counters persist across restarts.
+
+`STREAM RICHIESTE` shows the latest recorded events with local time, model,
+HTTP/WS transport, preset, changed/unchanged/error outcome, estimated savings
+and stage reasons. Press **`d`** for source/configuration details and per-stage
+before/after token counts, percentages and measurement methods. Unknown savings
+remain unknown; partial estimates and token increases are explicitly marked.
+The panels do not infer provider cache savings, costs, upstream latency or
+active requests. Preset `none` and interceptor-only traffic are not recorded.
+
+A running process is not a health check, and the final upstream is not monitored.
+Snapshot read time is separate from last-event time: an idle proxy is not stale
+just because no new event arrived. After a failed read, five seconds without a
+sample or a stopped proxy, totals/events are historical and live rates are hidden.
+Narrow terminals keep space for the newest events and service controls.
+
+---
+
+### Update Managed Services
+
+```bash
+aih ocx update                     # update OpenCodex to the latest available release
+aih update ocx                     # equivalent command-first form
+aih update ocx agentmemory         # update selected services
+aih update                         # pxpipe, ocx, agentmemory, headroom only
+aih update ocx --json              # JSON result array, exit code 1 on any failure
+```
+
+Updates are explicit: automatic version checks remain read-only. A current
+installation is left unchanged. Running services are restarted after an update;
+stopped services are not started. If installation fails after stopping a running
+service, aih attempts to start it again and reports any recovery failure.
+Unknown/custom service targets are rejected before any selected service is
+changed. The built-in `proxy` is part of ai-helper itself and is excluded from
+`aih update`: update the ai-helper package or rebuild the standalone executable
+instead. The proxy's bundled pxpipe library is likewise updated with ai-helper,
+not by updating the separate `pxpipe` service.
+
+The Node services use `npm install --global <package>@latest` (`pxpipe-proxy`,
+`@bitkyc08/opencodex`, `@agentmemory/agentmemory`), so npm must be available and
+its global installation directory writable and on PATH. Headroom uses its own
+`headroom update --yes` command to respect the existing Python installation.
+Installer output is captured in `aih logs <service>` rather than mixed into
+JSON or the live dashboard. An explicitly updated npx service is launched with
+the verified package version so an older project dependency/cache cannot win.
 
 ---
 
@@ -182,13 +228,23 @@ aih open proxy --repo
 ### 3. Start Services
 
 ```bash
-# Start all configured services
+# Start ocx, agentmemory and the pxpipe proxy
 aih start
 
 # Start a specific service
 aih start pxpipe
 aih start agentmemory
 ```
+
+Without service targets, `aih start` (or `aih up`) starts `ocx`, `agentmemory`,
+then the built-in proxy with these options:
+
+```bash
+aih start proxy http://127.0.0.1:10100/ --listen http://127.0.0.1:10102 --preset pxpipe --models "gpt-6-astra,google-antigravity/gemini-3.8*,anthropic/claude-fable*"
+```
+
+If the proxy is already running with different options, use `aih restart proxy`
+with the options above to apply them.
 
 `aih start` (also `aih up` and starts targeting individual services) checks npm's
 `latest` release of `@drakonkat/ai-helper`. If a newer version exists, it prints
@@ -327,6 +383,14 @@ aih restart proxy --preset none --interceptor=
 ```
 
 RTK presets require an `rtk` executable with `rtk pipe` support on PATH.
+The optional `rtk-headroom-pxpipe` recipe runs RTK -> Headroom -> pxpipe, in that
+order, and is included in the [benchmark](docs/benchmark.md). Adding/testing it
+does not change the active proxy recipe. Double compression can lose facts and
+should be evaluated before selecting it for everyday traffic.
+The benchmark also offers an opt-in `--suite quality` (12 Responses cases) and
+`*-native-bypass` flow variants to compare pxpipe with/without native image
+attachments. These variants do not reconfigure the everyday proxy. See the
+[quality and native-image benchmark](docs/benchmark.md#suite-qualità-e-richieste-con-immagini-native).
 `--rtk-filter=` selects automatic detection; `--rtk-filter grep` applies the
 grep-output filter to every tool result, so use it only with matching output.
 
@@ -507,7 +571,7 @@ above, without adding HTTP routes that could interfere with forwarded API paths.
 | `model_excluded` | Match `--models` to the request's exact model ID, including provider prefixes; a new list replaces the old one. |
 | Headroom shows `no_messages` | For Responses requests, this preset sends only tool-result text to Headroom. A request without tool outputs has nothing for that stage to compress. |
 | Zero savings with `no_static_context`, `below_min_*` or `not_profitable` | The stage was reached but pxpipe chose to preserve the request. Zero savings is valid. |
-| UI shows Headroom traffic but proxy statistics stay unchanged | The Headroom metrics/event panel is separate from the **PROXY** preset counters and can include other clients and older traffic. |
+| Headroom has traffic but the UI stream stays unchanged | Both UI panels use native proxy preset events. Point the client at the AIH listener and enable a preset; requests sent directly to Headroom are not included. |
 | Startup fails | Read `aih logs proxy -n 100`. Check Node on PATH, upstream/listener ports, and the saved interceptor path. `aih restart proxy --interceptor=` clears a missing interceptor. |
 | Windows build cannot replace `dist/aih.exe` (`EPERM`) | Exit any dashboard using that binary with `q`, then rebuild. |
 

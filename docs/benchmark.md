@@ -1,10 +1,14 @@
 # Benchmark dei flow del proxy
 
 Il benchmark confronta **gli stessi input** attraverso i preset reali `none`,
-`headroom`, `rtk`, `pxpipe`, `headroom-pxpipe`, `rtk-pxpipe`. Non legge né azzera
+`headroom`, `rtk`, `pxpipe`, `headroom-pxpipe`, `rtk-pxpipe`,
+`rtk-headroom-pxpipe`. Non legge né azzera
 le statistiche del proxy quotidiano e non cambia client, configurazioni o servizi.
-`none` viene sempre aggiunto come baseline. Non sono implementate nuove pipeline
-di produzione, né una doppia compressione RTK → Headroom.
+`none` viene sempre aggiunto come baseline. Il preset `rtk-headroom-pxpipe`
+esegue **RTK → Headroom → pxpipe** sul risultato dello stadio precedente; i tre
+stadi sono riportati separatamente. La doppia compressione può perdere fatti:
+Headroom non può recuperare informazioni già eliminate da RTK. Il nuovo preset
+non viene selezionato automaticamente nel proxy quotidiano.
 
 ## Avvio rapido
 
@@ -15,7 +19,7 @@ si esegue dal checkout con Node, non nel binario Bun compilato.
 # Smoke test senza Headroom, RTK o provider esterni
 npm run bench:proxy -- --presets none,pxpipe --formats responses --warmup 0 --repetitions 1
 
-# Tutti i sei flow; Headroom deve essere già disponibile a questo indirizzo
+# Tutti i sette flow; Headroom deve essere già disponibile a questo indirizzo
 npm run bench:proxy -- --headroom-url http://127.0.0.1:8787 --repetitions 5 --warmup 1
 
 # Stessi casi Responses attraverso HTTP e WebSocket
@@ -118,17 +122,93 @@ un controllo di conservazione, non una prova di comprensione o correttezza.
 
 ## Valutazione live, esplicita e potenzialmente a pagamento
 
+### Suite qualità e richieste con immagini native
+
+`--suite core` resta il default storico: 30 fixture, 10 per protocollo.
+`--suite quality` aggiunge un corpus **opt-in di 12 casi Responses**, destinato
+anche al confronto Astra/Fable. `--suite all` unisce i due corpora (42 fixture
+prima dei filtri/modelli). Il file passato con `--fixtures` è alternativo a
+`--suite`: non viene mescolato implicitamente con casi integrati.
+
+La suite qualità contiene:
+
+- 2 casi con regole in istruzioni lunghe, non nel tool output: recupero di un
+  fatto e rispetto della priorità delle istruzioni rispetto a una nota del tool;
+- 2 diagnostici di build, in fondo e in mezzo a output rumoroso, con risposta
+  JSON esatta comprendente errore, file, riga, colonna ed exit code;
+- 1 campo assente per verificare l'astensione invece dell'invenzione di un valore;
+- 7 casi con PNG nativi: singolo, multiplo/ordine, storico più allegato corrente,
+  risultato di tool, testo contraddittorio, detail low e controllo breve.
+
+I PNG sono pixel deterministici di pannelli sintetici con codici leggibili,
+senza metadati testuali o URL che contengano la soluzione. Sono **test di OCR e
+associazione**, non una valutazione generale di foto, diagrammi o screenshot.
+Le risposte attese e `evaluation.evidence` restano fuori da `body`, quindi non
+vengono inviate ai modelli. Nessuna immagine remota viene scaricata dal benchmark.
+
+```powershell
+# Ispezionare/esportare i 12 input prima di usarli; nessuna chiamata LLM
+node scripts/bench-proxy.js --suite quality --formats responses --list
+node scripts/bench-proxy.js --suite quality --formats responses --export-fixtures quality-fixtures.json
+
+# Replay offline: 12 casi × 2 modelli × 4 flow = 96 campioni
+npm run bench:models -- --suite quality --presets none,headroom,headroom-pxpipe,headroom-pxpipe-native-bypass --repetitions 1 --warmup 0
+```
+
+Gli alias **solo benchmark** `pxpipe-native-bypass`,
+`headroom-pxpipe-native-bypass`, `rtk-pxpipe-native-bypass` e
+`rtk-headroom-pxpipe-native-bypass` usano la ricetta reale corrispondente, ma
+saltano **solo pxpipe** quando la richiesta originale contiene immagini native.
+Il rilevamento avviene prima di RTK/Headroom, comprende contenuti multimodali e
+risultati di tool; ignora schemi, metadata e JSON citato come testo. Lo stadio
+registra `native_images_present`, non un risparmio vision inventato.
+
+Gli alias non sono inclusi nei 7 flow di default e non cambiano la configurazione
+quotidiana. I flow senza suffisso mantengono il comportamento precedente.
+Headroom/RTK restano attivi dove applicabili: il bypass di pxpipe **non è una
+garanzia** che un altro stadio preservi l'allegato. Anche questo viene verificato.
+Con tutti gli 11 flow e i 2 modelli, la suite qualità richiede **264 campioni per
+round**; aggiungere `--live` li renderebbe altrettanti tentativi provider.
+
+Nuovi controlli e campi del report:
+
+- `answerChecks.exact`: uguaglianza case-sensitive, ignorando soltanto whitespace
+  iniziale/finale; niente spiegazioni aggiuntive;
+- `answerChecks.jsonEquals`: JSON valido, nessun fence o prosa, stesso oggetto o
+  array atteso, stessi tipi/valori e nessuna chiave extra; ordine delle chiavi
+  irrilevante, chiavi duplicate rifiutate anche con escape Unicode;
+- `answerChecks.maxChars`: tetto alla lunghezza, combinabile con gli altri check;
+- `imageIntegrity`: hash del contenuto e di tutti gli attributi delle immagini
+  native, molteplicità, ordine relativo, raggruppamento e associazione a ruolo,
+  call ID e testo co-locato. Indici assoluti possono cambiare quando vengono
+  inseriti messaggi sintetici. Un cambio del testo co-locato viene segnalato in
+  modo conservativo, anche se una valutazione umana potrebbe ritenerlo innocuo;
+- `addedOrChanged` conta immagini nuove **o native modificate**, non le presume
+  tutte correttamente generate. `nativeImagesRetained` non è un punteggio vision;
+- `evidence` distingue risposte ancora disponibili nel testo da casi che
+  richiedono immagini native o renderizzate. Non è una validazione OCR.
+
+Il selettore esclude un candidato con perdita/alterazione degli allegati anche
+se la risposta supera i controlli. Nei casi dichiarati `rendered_context`, se
+pxpipe si applica ma lascia la risposta nel testo (per esempio nella factsheet),
+segnala `vision_evidence_not_discriminating`: quel pass non prova lettura delle
+immagini. Una vera valutazione live rimane necessaria; il replay offline non
+produce punteggi di comprensione visiva né sceglie un vincitore.
+
 ### GPT-6 Astra e Fable 5.1 sullo stesso corpus
 
 Il comando dedicato seleziona gli ID del gateway `gpt-6-astra` e
 `anthropic/claude-fable-5-1`, sul medesimo protocollo Responses:
 
 ```powershell
-# Replay offline: 20 fixture × 6 flow = 120 campioni
+# Replay offline: 20 fixture × 7 flow = 140 campioni
 npm run bench:models -- --repetitions 1 --warmup 0
 
-# Smoke live: al massimo 120 chiamate complessive, senza retry
-npm run bench:models -- --live --upstream http://127.0.0.1:10100 --repetitions 1 --warmup 0 --max-live-calls 120
+# Smoke live: al massimo 140 chiamate complessive, senza retry del runner
+npm run bench:models -- --live --responses-stream --upstream http://127.0.0.1:10100 --repetitions 1 --warmup 0 --max-live-calls 140 --stop-on-error
+
+# Solo baseline e nuova combinazione: 10 casi × 2 flow × 2 modelli = 40 chiamate
+npm run bench:models -- --presets none,rtk-headroom-pxpipe --live --responses-stream --upstream http://127.0.0.1:10100 --repetitions 1 --warmup 0 --max-live-calls 40
 ```
 
 Richiede un gateway che supporti **entrambi i modelli via Responses**; un endpoint
@@ -140,6 +220,14 @@ il limite chiamate si applica all'intera matrice, non a ciascun modello.
 I costi vision locali per questi modelli non vengono ricavati arbitrariamente
 da profili più vecchi: dove non supportati restano sconosciuti. La misura di
 riferimento nel test live è l'usage restituito dal gateway/provider.
+
+Gli upstream ChatGPT/Codex possono richiedere `stream: true` anche quando OCX
+accetta sintatticamente il non-stream. Usare `--responses-stream`: il runner
+consuma SSE fino all'evento terminale. Se il terminale omette l'output (come può
+accadere con Astra), ricostruisce il testo dagli item finalizzati
+`response.output_item.done`; l'usage proviene sempre dal terminale. I soli delta
+non bastano a dichiarare una risposta completa. Stream
+troncati o senza evento terminale restano errori, non risposte completate.
 
 ### Endpoint e credenziali
 
@@ -156,6 +244,12 @@ Le credenziali sono opzionali per gateway locali che non le richiedono; non
 vengono mai cercate automaticamente negli account o nei file dell'utente.
 
 Il collector inoltra al provider **il payload realmente trasformato dal proxy**.
+Con `--upstream http://127.0.0.1:10100` la catena è quindi
+`runner → proxy privato del preset → collector privato → OCX`, **non** il proxy
+quotidiano `rtk-pxpipe → OCX`. Il runner usa l'upstream esplicito, non quello del
+client Codex; impostarlo invece alla porta del proxy quotidiano reintrodurrebbe
+la doppia trasformazione. Le istanze proxy sono private, mentre OCX e il servizio
+Headroom rimangono condivisi e non vengono riavviati o riconfigurati.
 Ogni fixture pone una domanda con risposta nota contenuta nel tool output;
 `answerChecks` valuta la risposta reale. I report includono:
 
@@ -166,9 +260,12 @@ Ogni fixture pone una domanda con risposta nota contenuta nel tool output;
 
 Per Anthropic l'input normalizzato comprende input non-cached + letture/scritture
 cache, evitando di confrontare scope diversi. Campi non restituiti restano null.
-Streaming viene disabilitato, le Responses hanno `store: false` e `background: false`,
+Di default streaming viene disabilitato; `--responses-stream` lo abilita solo per
+Responses. Le Responses hanno `store: false` e non usano background jobs,
 Chat usa una singola completion, e le risposte
-sono limitate da `--max-output-tokens` (default 256). Vengono utilizzati bearer
+richiedono il limite `--max-output-tokens` (default 256). Il gateway/provider può
+ignorarlo: l'adapter ChatGPT di OCX osservato rimuove `max_output_tokens`, quindi
+non è una garanzia di budget. Vengono utilizzati bearer
 auth per OpenAI-compatible e `x-api-key` per Anthropic; redirect sono bloccati.
 
 **Non è un agente autonomo:** nessun tool viene eseguito, nessun retry o follow-up
@@ -189,6 +286,8 @@ casi applicabili × flow (incluso none) × (warmup + repetitions)
 Il numero viene mostrato prima delle chiamate; `--max-live-calls` (default 200)
 blocca piani più grandi prima di inviare richieste. Per una campagna più ampia,
 aumentare esplicitamente questo limite oppure ridurre corpus/rounds.
+Il limite conta i tentativi HTTP del runner: eventuali retry o fallback interni
+del gateway non sono sotto il suo controllo e vanno verificati nei log di OCX.
 
 Non c'è controllo della cache remota: fissare modello/versioni/configurazioni e
 ripetere le campagne. Ordine randomizzato riduce, ma non elimina, il bias della
@@ -227,7 +326,8 @@ Esempio minimo:
 `checks.toolIncludes` cerca solo nei risultati dei tool; `requestIncludes` nel
 testo nativo della richiesta. Le stringhe devono esistere già nell'originale.
 `answerChecks.includes/excludes` sono confronti letterali case-sensitive, non un
-LLM judge; non inserire le risposte nella domanda. Omettere `answerChecks` lascia
+LLM judge; `exact`, `jsonEquals` e `maxChars` consentono controlli più rigorosi.
+Non inserire le risposte nella domanda. Omettere `answerChecks` lascia
 la risposta non valutata, e impedisce una raccomandazione live. Le fixture
 integrate includono definizioni/coppie dei tool complete; rispettare i vincoli
 del proprio provider nelle fixture personalizzate. Non usare riferimenti a

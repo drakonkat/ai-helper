@@ -133,6 +133,75 @@ describe("probeChain", () => {
     }
   };
 
+  it("keeps native topology without inventing stages when proxy status is absent", async () => {
+    const { nodes, health } = await probeChain([], { nativeOnly: true });
+    expect(nodes.map(n => n.id)).toEqual(["client", "proxy", "upstream"]);
+    expect(nodes[1]).toEqual({ id: "proxy", label: "aih proxy", state: "unknown", detail: "" });
+    expect(nodes[2]).toEqual({ id: "upstream", label: "upstream", state: "unknown", detail: "" });
+    expect(health).toBeNull();
+  });
+
+  it("uses native topology for a proxy even when its options are missing", async () => {
+    const { nodes } = await probeChain([
+      { id: "proxy", status: "stopped", url: "http://127.0.0.1:10102" },
+      { id: "headroom", status: "running", url: "http://127.0.0.1:9" },
+      { id: "pxpipe", status: "running", url: "http://127.0.0.1:47821" },
+    ]);
+    expect(nodes.map(n => n.id)).toEqual(["client", "proxy", "upstream"]);
+    expect(nodes[1].state).toBe("stopped");
+    expect(nodes[1].detail).toBe("http://127.0.0.1:10102");
+    expect(nodes[2].state).toBe("unknown");
+    expect(nodes[2].detail).toBe("");
+  });
+
+  it("never probes Headroom in native-only mode, including missing proxy configuration", async () => {
+    let requests = 0;
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        requests++;
+        return Response.json({ status: "healthy" });
+      },
+    });
+    try {
+      for (const proxy of [
+        null,
+        { id: "proxy", status: "running" },
+        { id: "proxy", status: "running", proxyOptions: { preset: "headroom", headroomUrl: server.url.href } },
+      ]) {
+        const statuses = [{ id: "headroom", status: "running", url: server.url.href }];
+        if (proxy) statuses.push(proxy);
+        const { nodes, health } = await probeChain(statuses, { nativeOnly: true });
+        expect(nodes[1].id).toBe("proxy");
+        expect(health).toBeNull();
+      }
+      expect(requests).toBe(0);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  it("retains configured native stages and URLs without claiming upstream health", async () => {
+    const { nodes, health } = await probeChain([{
+      id: "proxy", status: "running", url: "http://127.0.0.1:10102",
+      proxyOptions: { preset: "rtk-headroom-pxpipe", headroomUrl: "http://127.0.0.1:8787", upstream: "http://127.0.0.1:10100/v1" },
+    }], { nativeOnly: true });
+    expect(nodes.map(n => n.id)).toEqual(["client", "proxy", "rtk", "headroom", "pxpipe", "upstream"]);
+    expect(nodes[2].label).toBe("rtk (pipe)");
+    expect(nodes[3].detail).toBe("http://127.0.0.1:8787");
+    expect(nodes[4].label).toBe("pxpipe (libreria)");
+    expect(nodes[4].state).toBe("running");
+    expect(nodes[5].state).toBe("unknown");
+    expect(nodes[5].detail).toBe("http://127.0.0.1:10100/v1");
+    expect(health).toBeNull();
+  });
+
+  it.each([undefined, "none", "unrecognized"])("does not invent compression stages for preset %s", async preset => {
+    const { nodes } = await probeChain([{ id: "proxy", status: "running", proxyOptions: { preset } }]);
+    expect(nodes.map(n => n.id)).toEqual(["client", "proxy", "upstream"]);
+  });
+
   it("builds the static chain when headroom does not answer", async () => {
     const { nodes, health } = await probeChain([
       { id: "headroom", status: "stopped", url: "http://127.0.0.1:9/dashboard" },

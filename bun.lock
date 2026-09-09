@@ -1,0 +1,26 @@
+{
+  "lockfileVersion": 1,
+  "configVersion": 0,
+  "workspaces": {
+    "": {
+      "name": "@drakonkat/ai-helper",
+      "dependencies": {
+        "gpt-tokenizer": "3.4.0",
+        "pxpipe-proxy": "0.13.2",
+        "toml-eslint-parser": "1.0.3",
+        "ws": "^8.21.3",
+      },
+    },
+  },
+  "packages": {
+    "eslint-visitor-keys": ["eslint-visitor-keys@5.0.1", "", {}, "sha512-tD40eHxA35h0PEIZNeIjkHoDR4YjjJp34biM0mDvplBe//mB+IHCqHDGV7pxF+7MklTvighcCPPZC7ynWyjdTA=="],
+
+    "gpt-tokenizer": ["gpt-tokenizer@3.4.0", "", {}, "sha512-wxFLnhIXTDjYebd9A9pGl3e31ZpSypbpIJSOswbgop5jLte/AsZVDvjlbEuVFlsqZixVKqbcoNmRlFDf6pz/UQ=="],
+
+    "pxpipe-proxy": ["pxpipe-proxy@0.13.2", "", { "dependencies": { "gpt-tokenizer": "^3.4.0" }, "bin": { "pxpipe": "bin/cli.js" } }, "sha512-utMkpkWAjgQyldB62ebWrTFKhTmMKTiwXIktqbHxLixrtgw/g+r9/0nzG2Vz1prKSvH2Q7x9JNrG4LwEmlHQ+g=="],
+
+    "toml-eslint-parser": ["toml-eslint-parser@1.0.3", "", { "dependencies": { "eslint-visitor-keys": "^5.0.0" } }, "sha512-A5F0cM6+mDleacLIEUkmfpkBbnHJFV1d2rprHU2MXNk7mlxHq2zGojA+SRvQD1RoMo9gqjZPWEaKG4v1BQ48lw=="],
+
+    "ws": ["ws@8.21.3", "", { "peerDependencies": { "bufferutil": "^4.0.1", "utf-8-validate": ">=5.0.2" }, "optionalPeers": ["bufferutil", "utf-8-validate"] }, "sha512-201TZ/kPWxoPr/OKWjquZR1SWKXcvxdH+e1xrx89b3YbmzLMFCLfnaG1HFIgWzJOEWZ7MvpK++odZufgYR50Rw=="],
+  }
+}

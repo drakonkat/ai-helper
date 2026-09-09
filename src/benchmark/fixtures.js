@@ -1,4 +1,6 @@
-import { evaluatePreservation } from "./quality.js";
+import { evaluatePreservation, validateAnswerChecks, requestTexts } from "./quality.js";
+import { qualityFixtures } from "./quality-fixtures.js";
+import { requestImages } from "../request-images.js";
 
 const PATHS = { responses: "/v1/responses", chat: "/v1/chat/completions", anthropic: "/v1/messages" };
 const SYSTEM = "You are evaluating synthetic tool results. Answer the final question using only the tool output. Return the requested literal values, case-sensitive, without explanation. Never execute further tools.";
@@ -100,17 +102,19 @@ function request(format, model, scenario) {
 }
 
 /** Thirty reproducible, secret-free requests; commands are data, never executed. */
-export function builtInFixtures({ model = "gpt-5.5", formats = Object.keys(PATHS) } = {}) {
+export function builtInFixtures({ model = "gpt-5.5", formats = Object.keys(PATHS), suite = "core" } = {}) {
   if (typeof model !== "string" || !model.trim()) throw new Error("fixture model must be a nonempty string");
   if (!Array.isArray(formats) || !formats.length || formats.some(format => !Object.hasOwn(PATHS, format)) || new Set(formats).size !== formats.length) {
     throw new Error(`fixture formats must be a nonempty, unique subset of: ${Object.keys(PATHS).join(", ")}`);
   }
-  return formats.flatMap(format => scenarios().map(scenario => ({
+  if (!["core", "quality", "all"].includes(suite)) throw new Error("fixture suite must be core, quality or all");
+  const core = suite === "quality" ? [] : formats.flatMap(format => scenarios().map(scenario => ({
     id: `${format}-${scenario.id}`, category: scenario.category, format, path: PATHS[format],
     body: request(format, model, scenario),
     checks: { toolIncludes: [...(scenario.preserve || scenario.expected)], requestIncludes: [scenario.question] },
     answerChecks: { includes: [...scenario.expected] },
   })));
+  return [...core, ...(suite === "core" ? [] : qualityFixtures({ model, formats }))];
 }
 
 function object(value) { return value !== null && typeof value === "object" && !Array.isArray(value); }
@@ -141,7 +145,15 @@ export function validateFixtures(input) {
     } else if (!Array.isArray(fixture.body.messages) || !fixture.body.messages.length) throw new Error(`${where}.body.messages must be a nonempty array`);
     if (fixture.body.tools !== undefined && !Array.isArray(fixture.body.tools)) throw new Error(`${where}.body.tools must be an array`);
     checkArrays(fixture.checks, ["toolIncludes", "requestIncludes"], `${where}.checks`);
-    if (fixture.answerChecks !== undefined) checkArrays(fixture.answerChecks, ["includes", "excludes"], `${where}.answerChecks`);
+    if (fixture.answerChecks !== undefined) validateAnswerChecks(fixture.answerChecks, `${where}.answerChecks`);
+    if (fixture.evaluation !== undefined) {
+      const e = fixture.evaluation;
+      if (!object(e) || !["rendered_context", "native_image"].includes(e.kind) || Object.keys(e).some(k => !["kind", "evidence"].includes(k)) ||
+        !Array.isArray(e.evidence) || !e.evidence.length || e.evidence.some(x => typeof x !== "string" || !x.trim())) throw new Error(`${where}.evaluation requires kind and nonempty evidence strings`);
+      const nativeText = requestTexts(fixture.body).join("\n");
+      if (e.kind === "native_image" && (!requestImages(fixture.body).length || e.evidence.some(x => nativeText.includes(x)))) throw new Error(`${where}.evaluation native-image evidence must be absent from native text and images must exist`);
+      if (e.kind === "rendered_context" && e.evidence.some(x => !nativeText.includes(x))) throw new Error(`${where}.evaluation rendered-context evidence must exist in original text`);
+    }
     const quality = evaluatePreservation(fixture.body, fixture.body, fixture.checks);
     const invalid = quality.checks.find(check => check.reason === "not_in_original");
     if (invalid) throw new Error(`${where}.checks.${invalid.kind} assertion ${JSON.stringify(invalid.expected)} is absent from the original ${invalid.kind === "toolIncludes" ? "tool output" : "request text"}`);

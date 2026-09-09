@@ -4,13 +4,15 @@ import { readFile, mkdir, writeFile, appendFile, readdir } from "node:fs/promise
 import { resolve, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { runBenchmark, prepareBenchmark, BENCHMARK_PRESETS } from "../src/benchmark/runner.js";
+import { runBenchmark, prepareBenchmark, BENCHMARK_PRESETS, SUPPORTED_BENCHMARK_PRESETS } from "../src/benchmark/runner.js";
 import { buildReport, reportCsv, reportMarkdown } from "../src/benchmark/report.js";
 
 const HELP = `Usage: node scripts/bench-proxy.js [options]
 
 Offline by default: private loopback proxies and real compressors; no provider call.
-  --presets LIST          ${BENCHMARK_PRESETS.join(",")} (default: all; none always included)
+  --presets LIST          ${SUPPORTED_BENCHMARK_PRESETS.join(",")}
+                         Default: ${BENCHMARK_PRESETS.join(",")}; none always included
+  --suite NAME           core (default), quality (12 stronger Responses cases), all
   --formats LIST          responses,chat,anthropic (default: all)
   --transports LIST       http,ws (default: http; WS only for Responses)
   --fixtures FILE         JSON array of custom fixtures instead of built-in corpus
@@ -28,6 +30,7 @@ Offline by default: private loopback proxies and real compressors; no provider c
   --out DIR               New output directory (default: benchmark-results/<run-id>)
   --save-payloads         Opt-in originals/transformed payloads and live answers; may contain sensitive data
   --live                 EXPLICITLY enable potentially billable provider calls
+  --responses-stream     Request SSE for Responses (required by ChatGPT/Codex upstreams)
   --upstream URL         Live provider root BEFORE /v1, e.g. http://127.0.0.1:10100
   --api-key-env NAME      Environment variable holding credentials (never written to reports)
   --max-output-tokens N   Live answer cap (default: 256; no tool execution or retries)
@@ -44,15 +47,16 @@ Offline runs never claim a semantic-quality winner. See docs/benchmark.md.
 `;
 
 export async function main(argv = process.argv.slice(2)) {
-  const strings = ["presets", "formats", "transports", "fixtures", "export-fixtures", "model", "compare-models", "repetitions", "warmup", "seed", "headroom-url", "rtk-filter", "models", "timeout-ms", "max-body-bytes", "out", "upstream", "api-key-env", "max-output-tokens", "max-live-calls", "max-quality-drop", "max-latency-regression"];
-  const booleans = ["help", "list", "save-payloads", "live", "stop-on-error"];
+  const strings = ["presets", "suite", "formats", "transports", "fixtures", "export-fixtures", "model", "compare-models", "repetitions", "warmup", "seed", "headroom-url", "rtk-filter", "models", "timeout-ms", "max-body-bytes", "out", "upstream", "api-key-env", "max-output-tokens", "max-live-calls", "max-quality-drop", "max-latency-regression"];
+  const booleans = ["help", "list", "save-payloads", "live", "responses-stream", "stop-on-error"];
   const { values } = parseArgs({ args: argv, options: { ...Object.fromEntries(strings.map(s => [s, { type: "string" }])), ...Object.fromEntries(booleans.map(s => [s, { type: "boolean" }])) }, strict: true, allowPositionals: false });
   if (values.help) { console.log(HELP); return 0; }
   const list = name => values[name] === undefined ? undefined : values[name].split(",").map(s => s.trim());
   const numeric = name => values[name] === undefined ? undefined : Number(values[name]);
   const formats = list("formats");
   if (formats && (formats.some(f => !["responses", "chat", "anthropic"].includes(f)) || new Set(formats).size !== formats.length)) throw new Error("Invalid formats list");
-  const preview = values.list || values["export-fixtures"] ? prepareBenchmark({ model: values.model, compareModels: list("compare-models"), formats, presets: ["none"] }).fixtures : null;
+  if (values.fixtures && values.suite) throw new Error("Use --fixtures OR --suite, not both");
+  const preview = values.list || values["export-fixtures"] ? prepareBenchmark({ model: values.model, compareModels: list("compare-models"), formats, suite: values.suite, presets: ["none"] }).fixtures : null;
   if (values.list) { console.log(preview.map(f => `${f.id}\t${f.format}\t${f.category}`).join("\n")); return 0; }
   if (values["export-fixtures"]) {
     const file = resolve(values["export-fixtures"]);
@@ -65,11 +69,11 @@ export async function main(argv = process.argv.slice(2)) {
   const thresholds = { maxQualityDrop: numeric("max-quality-drop") ?? 0, maxLatencyRegression: numeric("max-latency-regression") ?? 25 };
   if (Object.values(thresholds).some(n => !Number.isFinite(n) || n < 0)) throw new Error("Thresholds must be nonnegative numbers");
   const fixtures = values.fixtures ? JSON.parse(await readFile(resolve(values.fixtures), "utf8")) : undefined;
-  const options = { presets: list("presets"), formats, transports: list("transports"), fixtures, model: values.model, compareModels: list("compare-models"),
+  const options = { presets: list("presets"), suite: values.suite, formats, transports: list("transports"), fixtures, model: values.model, compareModels: list("compare-models"),
     repetitions: numeric("repetitions"), warmup: numeric("warmup"), seed: numeric("seed"),
     headroomUrl: values["headroom-url"], rtkFilter: values["rtk-filter"], models: values.models,
     timeoutMs: numeric("timeout-ms"), maxBodyBytes: numeric("max-body-bytes"), live: values.live,
-    upstream: values.upstream, apiKey, maxOutputTokens: numeric("max-output-tokens"), maxLiveCalls: numeric("max-live-calls") };
+    upstream: values.upstream, apiKey, responsesStream: values["responses-stream"], maxOutputTokens: numeric("max-output-tokens"), maxLiveCalls: numeric("max-live-calls") };
   const prepared = prepareBenchmark(options); // Validate before creating/reserving any output files.
   const directory = resolve(values.out || join("benchmark-results", `${new Date().toISOString().replace(/[:.]/g, "-")}-${randomBytes(3).toString("hex")}`));
   await mkdir(directory, { recursive: true });

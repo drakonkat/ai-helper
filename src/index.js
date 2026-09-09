@@ -29,10 +29,12 @@ ${bold("COMMANDS:")}
   ${yellow("status")}, ${yellow("ps")}              Show status, PID, uptime, and web dashboard URLs
   ${yellow("status -ui")}              Interactive live dashboard: manage services and watch the AI pipeline
   ${yellow("open")}, ${yellow("dash")} [services...]  Open web dashboard(s) directly in your default browser
-  ${yellow("start")}, ${yellow("up")} [services...]   Start all or specified services (pxpipe, ocx, agentmemory, headroom)
+  ${yellow("start")}, ${yellow("up")} [services...]   Start ocx, agentmemory and the pxpipe proxy, or specified services
   ${yellow("start proxy")} <upstream>     Start HTTP/SSE/WebSocket proxy (default: 127.0.0.1:10101)
   ${yellow("stop")}, ${yellow("down")} [services...]   Stop all or specified services
   ${yellow("restart")} [services...]      Restart all or specified services
+  ${yellow("update")} [services...]       Update managed services to the latest available version
+  ${yellow("<service> update")}          Update one service (for example: aih ocx update)
   ${yellow("logs")} <service> [-n 50] [-f]  View or stream live logs for a service
   ${yellow("stats proxy")} [--json]       Show proxy token savings estimates and recent requests
   ${yellow("install")}                  Build standalone binary to ~/.local/bin and verify PATH
@@ -52,12 +54,17 @@ ${bold("OPTIONS:")}
   ${gray("--repo")}                Open GitHub repositories instead of dashboards (open only)
   ${gray("--listen <http://host:port>")}  Proxy loopback listening address
   ${gray("--interceptor <file.mjs>")}     Proxy JavaScript hooks (loaded at startup)
-  ${gray("--preset <name>")}              pxpipe | headroom | rtk | headroom-pxpipe | rtk-pxpipe | none
+  ${gray("--preset <name>")}              pxpipe | headroom | rtk | headroom-pxpipe | rtk-pxpipe | rtk-headroom-pxpipe | none
   ${gray("--models <list>")}              pxpipe model allowlist, comma-separated (trailing * supported)
   ${gray("--headroom-url <url>")}         Headroom service (default: http://127.0.0.1:8787)
   ${gray("--rtk-filter <name>")}          Fixed rtk pipe filter (default: auto-detect)
   ${gray("--max-body-bytes <num>")}       Proxy buffered request / WebSocket limit (default: 67108864)
   ${gray("-ui, --ui")}             Open the interactive dashboard (status only, requires a TTY)
+
+${bold("SERVICE UPDATES:")}
+  'update' without targets updates pxpipe, ocx, agentmemory and headroom, not proxy.
+  In the live dashboard, select a service with up/down and press u to update it.
+  Only running services are restarted; stopped services stay stopped.
 
 ${bold("CODEX CONFIGURATION:")}
   Starting aih's proxy, or ocx with an active proxy, updates Codex's two base URLs.
@@ -70,6 +77,8 @@ ${bold("EXAMPLES:")}
   ${dim("$")} ${cyan(CLI_NAME)} start
   ${dim("$")} ${cyan(CLI_NAME)} stop pxpipe
   ${dim("$")} ${cyan(CLI_NAME)} restart ocx
+  ${dim("$")} ${cyan(CLI_NAME)} ocx update
+  ${dim("$")} ${cyan(CLI_NAME)} update ocx agentmemory --json
   ${dim("$")} ${cyan(CLI_NAME)} logs pxpipe -f
 `);
 }
@@ -215,10 +224,51 @@ export async function main() {
     }
   }
 
-  const command = positionalArgs[0]?.toLowerCase() || "status";
-  const targets = positionalArgs.slice(1);
+  const serviceFirstUpdate = positionalArgs[1]?.toLowerCase() === "update" && positionalArgs[0]?.toLowerCase() !== "update";
+  const command = serviceFirstUpdate ? "update" : positionalArgs[0]?.toLowerCase() || "status";
+  const targets = serviceFirstUpdate ? [positionalArgs[0].toLowerCase()] : positionalArgs.slice(1);
 
   switch (command) {
+    case "update": {
+      const ids = [...new Set(targets.length ? targets : SERVICE_IDS)];
+      const invalid = ids.filter(id => !SERVICE_IDS.includes(id));
+      const invalidOption = rawArgs.find(arg => arg.startsWith("-") && arg !== "--json");
+      let results;
+      // Validate the entire request before updating anything, including the
+      // service-first alias (which accepts exactly one service).
+      if (invalidOption) {
+        results = [{ id: targets[0] || null, success: false, message: `Unsupported update option '${invalidOption}'. Only --json is supported.` }];
+      } else if (serviceFirstUpdate && positionalArgs.length !== 2) {
+        results = [{ id: targets[0], success: false, message: `Usage: ${CLI_NAME} <service> update [--json]; use '${CLI_NAME} update <services...>' for multiple services.` }];
+      } else if (invalid.length) {
+        results = invalid.map(id => ({ id, success: false, message: id === "proxy"
+          ? "The built-in proxy is updated with ai-helper itself; update the ai-helper package or rebuild its executable."
+          : `Unsupported service '${id}'. Updatable services: ${SERVICE_IDS.join(", ")}.` }));
+      } else {
+        if (!jsonOutput) printBanner();
+        results = [];
+        for (const id of ids) {
+          if (!jsonOutput) process.stdout.write(`  Updating ${bold(id)}... `);
+          let result;
+          try {
+            result = await manager.updateService(id);
+          } catch (err) {
+            result = { success: false, message: err?.message || String(err) };
+          }
+          results.push({ id, ...result });
+          if (!jsonOutput) {
+            console.log((result.success ? green : red)(result.message || `${id}: ${result.success ? "updated" : "update failed"}`));
+            printCodexConfig(result);
+          }
+        }
+      }
+      if (jsonOutput) console.log(JSON.stringify(results, null, 2));
+      else if (invalidOption || invalid.length || (serviceFirstUpdate && positionalArgs.length !== 2)) {
+        for (const result of results) console.error(red(result.message));
+      }
+      if (results.some(result => !result.success)) process.exitCode = 1;
+      break;
+    }
     case "stats": {
       if (targets.length > 1 || (targets[0] && targets[0] !== "proxy")) throw new Error("Usage: aih stats proxy [--json]");
       const stats = readProxyStats();
@@ -313,13 +363,18 @@ export async function main() {
     case "up": {
       await checkForUpdates();
       if (!jsonOutput) printBanner();
-      const svcsToStart = targets.length > 0 ? targets : Object.keys(manager.readState().services);
+      const svcsToStart = targets.length > 0 ? targets : ["ocx", "agentmemory", "proxy"];
       if (!jsonOutput) console.log(cyan(`Starting service(s): ${svcsToStart.join(", ")}...\n`));
       const results = [];
 
       for (const id of svcsToStart) {
         if (!jsonOutput) process.stdout.write(`  Launching ${bold(id)}... `);
-        const res = await manager.startService(id);
+        const res = await manager.startService(id, !targets.length && id === "proxy" ? {
+          upstream: "http://127.0.0.1:10100/",
+          listen: "http://127.0.0.1:10102",
+          preset: "pxpipe",
+          models: "gpt-6-astra,google-antigravity/gemini-3.8*,anthropic/claude-fable*",
+        } : undefined);
         results.push({ id, ...res });
         if (jsonOutput) continue;
         if (res.success) {

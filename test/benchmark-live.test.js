@@ -16,6 +16,198 @@ async function serverFor(t, handler) {
   return `http://127.0.0.1:${server.address().port}`;
 }
 const options = upstream => ({ upstream, apiKey: "test-only-private-key", timeoutMs: 5000, maxBodyBytes: 100000 });
+const responsesFixture = { format: "responses", path: "/v1/responses" };
+const sseEvent = (type, response) => `event: ${type}\ndata: ${JSON.stringify({ type, response })}\n\n`;
+const doneItem = (output_index, item) => `data: ${JSON.stringify({ type: "response.output_item.done", output_index, item })}\n\n`;
+const messageItem = (id, text) => ({ id, type: "message", status: "completed", role: "assistant", content: [{ type: "output_text", text }] });
+
+test("Responses SSE reconstructs observed Astra finalized message with empty terminal output and terminal-only usage", async t => {
+  const item = messageItem("msg_astra", "2.17.4-rc.3");
+  const terminal = { status: "completed", output: [], usage: { input_tokens: 155, output_tokens: 13 } };
+  t.mock.method(globalThis, "fetch", async () => new Response(
+    'data: {"type":"response.output_text.delta","delta":"2.17.4-rc.3","usage":{"input_tokens":9999}}\n\n' +
+    doneItem(0, item) + doneItem(0, item) + sseEvent("response.completed", terminal),
+    { headers: { "content-type": "text/event-stream" } }));
+  const result = await callProvider({ stream: true }, responsesFixture, options("http://localhost"));
+  assert.equal(result.error, undefined);
+  assert.equal(result.complete, true);
+  assert.equal(result.text, "2.17.4-rc.3");
+  assert.equal(result.outputFromFinalizedItems, true);
+  assert.equal(result.usage.inputTokens, 155);
+  assert.equal(result.usage.outputTokens, 13);
+});
+
+test("Responses SSE merges finalized items in output order and prefers terminal matching IDs without duplicates", async t => {
+  const first = messageItem("first", "old first"), second = messageItem("second", "second answer");
+  t.mock.method(globalThis, "fetch", async () => new Response(
+    doneItem(1, second) + doneItem(0, first) +
+    sseEvent("response.completed", { status: "completed", output: [messageItem("first", "authoritative first")] }),
+    { headers: { "content-type": "text/event-stream" } }));
+  const result = await callProvider({ stream: true }, responsesFixture, options("http://localhost"));
+  assert.equal(result.error, undefined);
+  assert.equal(result.text, "authoritative first\nsecond answer");
+  assert.equal(result.complete, true);
+  assert.equal(result.usage.inputTokens, null);
+});
+
+test("Responses SSE retains finalized function and custom tool calls even when terminal items are missing", async t => {
+  const tool = { id: "function1", type: "function_call", name: "must_not_execute", arguments: "{}" };
+  const custom = { id: "custom1", type: "custom_tool_call", name: "must_not_execute", input: "private prompt" };
+  const item = messageItem("answer", "requested tools");
+  t.mock.method(globalThis, "fetch", async () => new Response(doneItem(0, tool) + doneItem(1, custom) + doneItem(2, item) +
+    sseEvent("response.completed", { status: "completed", output: [item] }),
+    { headers: { "content-type": "text/event-stream" } }));
+  const result = await callProvider({ stream: true }, responsesFixture, options("http://localhost"));
+  assert.equal(result.error, undefined);
+  assert.equal(result.text, "requested tools");
+  assert.equal(result.additionalToolCalls, 2);
+  assert.equal(result.complete, false);
+  assert.ok(!JSON.stringify(result).includes("private prompt"));
+});
+
+test("Responses SSE empty terminal after text deltas alone is a parser error, not a scored empty answer", async t => {
+  t.mock.method(globalThis, "fetch", async () => new Response(
+    'data: {"type":"response.output_text.delta","delta":"private prompt"}\n\n' +
+    sseEvent("response.completed", { status: "completed", output: [], usage: { input_tokens: 8, output_tokens: 2 } }),
+    { headers: { "content-type": "text/event-stream" } }));
+  const result = await callProvider({ stream: true }, responsesFixture, options("http://localhost"));
+  assert.equal(result.complete, false);
+  assert.match(result.error, /without finalized output text/);
+  assert.equal(result.usage.totalTokens, 10);
+  assert.ok(!JSON.stringify(result).includes("private prompt"));
+});
+
+test("Responses SSE rejects malformed or conflicting finalized identities instead of inventing output", async t => {
+  let wire;
+  t.mock.method(globalThis, "fetch", async () => new Response(wire + sseEvent("response.completed", { status: "completed", output: [] }),
+    { headers: { "content-type": "text/event-stream" } }));
+  const item = messageItem("same", "private prompt");
+  for (wire of [doneItem(-1, item), doneItem(0, { type: "message" }), doneItem(0, item) + doneItem(1, item),
+    doneItem(0, item) + doneItem(0, messageItem("different", "test-only-private-key"))]) {
+    const result = await callProvider({ stream: true }, responsesFixture, options("http://localhost"));
+    assert.equal(result.complete, false);
+    assert.match(result.error, /finalized output/);
+    assert.ok(!JSON.stringify(result).includes("private prompt"));
+    assert.ok(!JSON.stringify(result).includes("test-only-private-key"));
+  }
+});
+
+test("Responses SSE handles fragmented UTF-8, CRLF, comments and multiline data using only terminal usage/text", async t => {
+  const terminal = { status: "completed", output: [{ type: "message", content: [{ type: "output_text", text: "caffè ☕" }] }],
+    usage: { input_tokens: 30, output_tokens: 4, input_tokens_details: { cached_tokens: 20 }, output_tokens_details: { reasoning_tokens: 2 } } };
+  const wire = ": keepalive\r\nid: ignored\r\nretry: 1000\r\n\r\n" +
+    'event: response.output_text.delta\r\ndata: {"type":"response.output_text.delta","delta":"caffè ☕ discarded delta","usage":{"input_tokens":99999}}\r\n\r\n' +
+    `event: response.completed\r\ndata: {"type":"response.completed",\r\ndata: "response":${JSON.stringify(terminal)}}\r\n\r\n`;
+  const bytes = Buffer.from(wire);
+  let offset = 0, cancelled = false;
+  t.mock.method(globalThis, "fetch", async (_url, request) => {
+    assert.equal(JSON.parse(request.body).stream, true);
+    return new Response(new ReadableStream({
+      pull(controller) { if (offset < bytes.length) controller.enqueue(bytes.subarray(offset, ++offset)); },
+      cancel() { cancelled = true; },
+    }), { headers: { "content-type": "text/event-stream; charset=utf-8" } });
+  });
+  const result = await callProvider({ stream: true }, responsesFixture, { ...options("http://localhost"), maxBodyBytes: bytes.length });
+  assert.equal(result.error, undefined);
+  assert.equal(result.complete, true);
+  assert.equal(result.text, "caffè ☕");
+  assert.deepEqual(result.usage, parseProviderResponse(terminal, "responses").usage);
+  assert.ok(Number.isFinite(result.firstOutputMs) && result.firstOutputMs >= 0 && result.firstOutputMs <= result.durationMs);
+  assert.equal(cancelled, true);
+});
+
+test("Responses SSE terminates and cancels immediately without waiting for provider keepalive EOF", async t => {
+  let disconnected;
+  const closed = new Promise(resolve => { disconnected = resolve; });
+  const upstream = await serverFor(t, (_request, response) => {
+    response.setHeader("content-type", "text/event-stream");
+    response.on("close", disconnected);
+    response.write(sseEvent("response.completed", { status: "completed", output_text: "FINAL", usage: { input_tokens: 7, output_tokens: 1 } }));
+    // Deliberately no end(): completion must cancel the open response stream.
+  });
+  const result = await callProvider({ stream: true }, responsesFixture, { ...options(upstream), timeoutMs: 1500 });
+  assert.equal(result.text, "FINAL");
+  assert.equal(result.complete, true);
+  assert.equal(result.firstOutputMs, null);
+  await Promise.race([closed, new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error("SSE reader did not close the provider socket")), 1000); timer.unref(); })]);
+});
+
+test("Responses SSE incomplete and failed terminals are never complete and do not expose provider errors", async t => {
+  let status;
+  t.mock.method(globalThis, "fetch", async () => new Response(sseEvent(`response.${status}`, {
+    status, output_text: "partial answer", usage: { input_tokens: 10, output_tokens: 2 },
+    error: { message: "private prompt test-only-private-key" },
+  }), { headers: { "content-type": "text/event-stream" } }));
+  for (status of ["incomplete", "failed"]) {
+    const result = await callProvider({ stream: true }, responsesFixture, options("http://localhost"));
+    assert.equal(result.complete, false);
+    assert.equal(result.text, "partial answer");
+    assert.equal(result.usage.totalTokens, 12);
+    assert.equal(result.error, status === "failed" ? "Provider response failed" : undefined);
+    assert.ok(!JSON.stringify(result).includes("private prompt"));
+    assert.ok(!JSON.stringify(result).includes("test-only-private-key"));
+  }
+});
+
+test("Responses SSE rejects missing, truncated, malformed and contradictory terminal events safely", async t => {
+  let wire;
+  t.mock.method(globalThis, "fetch", async () => new Response(wire, { headers: { "content-type": "text/event-stream" } }));
+  const cases = [
+    ["", /without a terminal/],
+    ['data: {"type":"response.output_text.delta","delta":"private prompt","usage":{"input_tokens":123}}\n\n', /without a terminal/],
+    ['data: [DONE]\n\n', /without a terminal/],
+    [sseEvent("response.completed", { status: "completed", output: [] }).trimEnd(), /without a terminal/],
+    ['data: {"private prompt test-only-private-key"}\n\n', /invalid event/],
+    ['data: null\n\n', /invalid event/],
+    ['data: {"type":"error","message":"private prompt test-only-private-key"}\n\n', /reported an error/],
+    ['event: response.completed\ndata: {"type":"response.failed","response":{"status":"failed"}}\n\n', /invalid event/],
+    [sseEvent("response.completed", { status: "incomplete", output: [] }), /invalid terminal/],
+    [sseEvent("response.completed", { status: "completed" }), /invalid terminal/],
+    [sseEvent("response.completed", { status: "completed", output: "private prompt" }), /invalid terminal/],
+    [sseEvent("response.completed", { status: "completed", output: [null] }), /invalid terminal/],
+  ];
+  for (const [input, expected] of cases) {
+    wire = input;
+    const result = await callProvider({ stream: true }, responsesFixture, options("http://localhost"));
+    assert.equal(result.complete, false);
+    assert.match(result.error, expected);
+    assert.equal(result.text, undefined);
+    assert.equal(result.usage, undefined);
+    assert.ok(!JSON.stringify(result).includes("private prompt"));
+    assert.ok(!JSON.stringify(result).includes("test-only-private-key"));
+  }
+});
+
+test("Responses SSE bounds total bytes including comments and cancels invalid UTF-8 streams", async t => {
+  let bytes, cancelled;
+  t.mock.method(globalThis, "fetch", async () => new Response(new ReadableStream({
+    start(controller) { controller.enqueue(bytes); }, cancel() { cancelled = true; },
+  }), { headers: { "content-type": "text/event-stream" } }));
+  for (const [input, cap, error] of [
+    [Buffer.from(": " + "x".repeat(100) + "\n\n"), 50, /maxBodyBytes/],
+    [Buffer.from([0xff, 0xfe]), 100, /could not be read/],
+  ]) {
+    bytes = input; cancelled = false;
+    const result = await callProvider({ stream: true }, responsesFixture, { ...options("http://localhost"), maxBodyBytes: cap });
+    assert.equal(result.complete, false);
+    assert.match(result.error, error);
+    assert.equal(cancelled, true);
+    assert.equal(result.usage, undefined);
+  }
+});
+
+test("Responses SSE does not invent missing terminal usage from deltas", async t => {
+  t.mock.method(globalThis, "fetch", async () => new Response(
+    'data: {"type":"response.output_text.delta","delta":"untrusted","usage":{"input_tokens":999,"output_tokens":123}}\n\n' +
+    sseEvent("response.completed", { status: "completed", output_text: "final" }),
+    { headers: { "content-type": "text/event-stream" } }));
+  const result = await callProvider({ stream: true }, responsesFixture, options("http://localhost"));
+  assert.equal(result.text, "final");
+  assert.equal(result.complete, true);
+  assert.equal(result.usage.inputTokens, null);
+  assert.equal(result.usage.outputTokens, null);
+  assert.equal(result.usage.totalTokens, null);
+});
 
 test("upstream validation rejects credentials, query, fragments and non-HTTP protocols", () => {
   assert.equal(validateUpstream("https://api.example.test/v1"), "https://api.example.test/v1");

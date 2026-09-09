@@ -27,11 +27,20 @@ function summarize(rows) {
     const id = `${stage.name}:${stage.reason}`;
     stageReasons[id] = (stageReasons[id] || 0) + 1;
   }
+  const imageRows = successful.filter(r => r.imageIntegrity);
+  const evidenceStatuses = {};
+  for (const row of rows) if (row.evidence) evidenceStatuses[row.evidence.status] = (evidenceStatuses[row.evidence.status] || 0) + 1;
   return {
     preset: rows[0].preset, model: rows[0].model, format: rows[0].format, transport: rows[0].transport,
     attempts: rows.length, successful: successful.length, errors: rows.length - successful.length,
     changed: successful.filter(r => r.changed).length,
     stageReasons,
+    nativeImagePolicy: rows[0].nativeImagePolicy || "allow",
+    nativeImages: { measured: imageRows.length, before: imageRows.reduce((n, r) => n + r.imageIntegrity.before, 0),
+      retained: imageRows.reduce((n, r) => n + r.imageIntegrity.retained, 0), after: imageRows.reduce((n, r) => n + r.imageIntegrity.after, 0),
+      addedOrChanged: imageRows.reduce((n, r) => n + r.imageIntegrity.addedOrChanged, 0),
+      failed: imageRows.filter(r => r.imageIntegrity.status === "fail").length },
+    evidenceStatuses,
     tokens: { before: known.length ? before : null, after: known.length ? after : null,
       saved: known.length ? before - after : null, savedPercent: known.length ? percent(before - after, before) : null,
       measured: known.length, coveragePercent: percent(known.length, rows.length), partial: known.length !== rows.length },
@@ -68,6 +77,11 @@ export function buildReport(run, { maxQualityDrop = 0, maxLatencyRegression = 25
       if (!baseline || baseline.errors || baseline.attempts !== s.attempts) reasons.push("baseline_missing_failed_or_incomplete");
       const baselineRows = groups.get(`${key(s)}:none`) || [];
       const candidateRows = groups.get(`${key(s)}:${s.preset}`) || [];
+      if (s.nativeImages.failed) reasons.push("native_image_regression");
+      if (baseline?.nativeImages.failed) reasons.push("baseline_native_image_regression");
+      if (candidateRows.some(r => r.before?.images > 0 && !r.imageIntegrity)) reasons.push("native_image_integrity_unmeasured");
+      if (baselineRows.some(r => r.before?.images > 0 && !r.imageIntegrity)) reasons.push("baseline_native_image_integrity_unmeasured");
+      if (candidateRows.some(r => r.evidence?.kind === "rendered_context" && r.evidence.nativeEvidenceCount > 0 && r.stages?.some(stage => stage.name === "pxpipe" && stage.applied))) reasons.push("vision_evidence_not_discriminating");
       if (sampleKeys(baselineRows) !== sampleKeys(candidateRows)) reasons.push("baseline_samples_do_not_match");
       if (s.errors) reasons.push("request_errors");
       const tokens = live ? s.provider.input.total : s.tokens.after;
@@ -109,11 +123,13 @@ const cell = x => {
   return '"' + (typeof x === "string" && /^[=+\-@\t\r]/.test(value) ? "'" : "") + value.replaceAll('"', '""') + '"';
 };
 export function reportCsv(report) {
-  const columns = ["caseId", "category", "model", "format", "transport", "preset", "round", "phase", "firstRequest", "status", "before", "after", "saved", "durationMs", "connectionMs", "preservation", "answerQuality", "inputTokens", "outputTokens", "cachedInputTokens", "cacheWriteInputTokens", "complete", "error"];
+  const columns = ["caseId", "category", "model", "format", "transport", "preset", "round", "phase", "firstRequest", "status", "before", "after", "saved", "durationMs", "connectionMs", "preservation", "answerQuality", "inputTokens", "outputTokens", "cachedInputTokens", "cacheWriteInputTokens", "complete", "error", "nativeImagePolicy", "nativeImagesBefore", "nativeImagesRetained", "imagesAddedOrChanged", "imageIntegrity", "evidenceStatus"];
   const lines = report.records.map(r => {
     const before = r.before?.totalTokens, after = r.after?.totalTokens;
     const values = { ...r, before, after, saved: finite(before) && finite(after) ? before - after : null,
-      preservation: r.preservation?.status, answerQuality: r.answerQuality?.status, ...r.live?.usage, complete: r.live?.complete };
+      preservation: r.preservation?.status, answerQuality: r.answerQuality?.status, ...r.live?.usage, complete: r.live?.complete,
+      nativeImagesBefore: r.imageIntegrity?.before, nativeImagesRetained: r.imageIntegrity?.retained, imagesAddedOrChanged: r.imageIntegrity?.addedOrChanged,
+      imageIntegrity: r.imageIntegrity?.status, evidenceStatus: r.evidence?.status };
     return columns.map(c => cell(values[c])).join(",");
   });
   return [columns.join(","), ...lines].join("\n") + "\n";
@@ -130,6 +146,11 @@ export function reportMarkdown(report) {
   if (report.meta.mode === "live") {
     lines.push("", "## Provider-reported usage (measured requests only)", "", "| Model / format / transport | Flow | Input | Output | Cache read | Cache write | Complete answers |", "|---|---|---:|---:|---:|---:|---:|");
     for (const s of report.summaries) lines.push(`| ${md(s.model)} / ${s.format} / ${s.transport} | ${s.preset} | ${s.provider.input.total ?? "?"} | ${s.provider.output.total ?? "?"} | ${s.provider.cachedInput.total ?? "?"} | ${s.provider.cacheWriteInput.total ?? "?"} | ${s.provider.complete}/${s.attempts} |`);
+  }
+  if (report.summaries.some(s => s.nativeImages.before || Object.keys(s.evidenceStatuses).length)) {
+    lines.push("", "## Images and evidence coverage", "", "Native integrity is byte/metadata/order/association preservation, not visual understanding. Added/changed images are not assumed to be valid renders.",
+      "", "| Model / flow | Native retained / original | Added or changed images | Integrity failures | Evidence location |", "|---|---:|---:|---:|---|");
+    for (const s of report.summaries) lines.push(`| ${md(s.model)} / ${s.preset} | ${s.nativeImages.retained}/${s.nativeImages.before} | ${s.nativeImages.addedOrChanged} | ${s.nativeImages.failed} | ${md(JSON.stringify(s.evidenceStatuses))} |`);
   }
   lines.push("", "## Decision support", "", "Pareto candidates trade input-token savings against p95 latency and answer pass rate; this is not a cost or statistical-significance claim.");
   for (const d of report.decisions) {

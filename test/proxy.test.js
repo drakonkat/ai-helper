@@ -242,7 +242,8 @@ test("rtk preset filters only tool output text in all three AI formats", { timeo
   }
 });
 
-test("rtk-pxpipe applies RTK before the real library over HTTP and WS; models gate only pxpipe", { timeout: 15000 }, async t => {
+for (const preset of ["rtk-pxpipe", "rtk-headroom-pxpipe"]) {
+test(`${preset} preserves stage order over HTTP and WS; models gate only pxpipe`, { timeout: 20000 }, async t => {
   try { await exec("rtk", ["--version"], { windowsHide: true }); }
   catch (error) { if (error.code === "ENOENT") return t.skip("rtk is not installed"); throw error; }
   const body = aiBody();
@@ -255,10 +256,29 @@ test("rtk-pxpipe applies RTK before the real library over HTTP and WS; models ga
   const context = { method: "POST", path: "/v1/responses", headers: { "content-type": "application/json" }, body: Buffer.from(JSON.stringify(body)) };
   await rtk.onRequest(context);
   assert.ok(context.body.length < Buffer.byteLength(JSON.stringify(body)));
-  const expected = await transformOpenAIResponses(context.body, { model: body.model });
+  const afterRtk = JSON.parse(context.body);
+  let headroomUrl, headroomCalls = 0;
+  const withHeadroom = preset === "rtk-headroom-pxpipe";
+  const beforePxpipe = structuredClone(afterRtk);
+  if (withHeadroom) {
+    beforePxpipe.input[2].output = "headroom-result";
+    const compressor = http.createServer(async (req, res) => {
+      const chunks = []; for await (const chunk of req) chunks.push(chunk);
+      const payload = JSON.parse(Buffer.concat(chunks)); headroomCalls++;
+      assert.equal(req.url, "/v1/compress");
+      assert.equal(payload.messages[0].content, afterRtk.input[2].output, "Headroom must receive RTK output, not original text");
+      assert.equal(payload.config.mode, "lossy_inline");
+      res.writeHead(headroomCalls === 4 ? 503 : 200, { "content-type": "application/json" });
+      // Third request tests an unchanged Headroom result + gated pxpipe: retain RTK changes.
+      res.end(JSON.stringify({ messages: payload.messages.map(m => ({ ...m, content: headroomCalls === 3 ? m.content : "headroom-result" })), tokens_before: 100, tokens_after: headroomCalls === 3 ? 100 : 5 }));
+    });
+    headroomUrl = await listen(compressor);
+    t.after(() => { compressor.closeAllConnections(); return new Promise(done => compressor.close(done)); });
+  }
+  const expected = await transformOpenAIResponses(Buffer.from(JSON.stringify(beforePxpipe)), { model: body.model });
   assert.equal(expected.info.compressed, true);
   const measurements = [];
-  const { proxy, upstream } = await fixture(t, (req, res) => req.pipe(res), { preset: "rtk-pxpipe", models: "gpt-5.5", rtkFilter: "grep", onStats: event => measurements.push(event) });
+  const { proxy, upstream } = await fixture(t, (req, res) => req.pipe(res), { preset, headroomUrl, models: "gpt-5.5", rtkFilter: "grep", onStats: event => measurements.push(event) });
   const result = await request(proxy.url + context.path, { method: "POST", headers: context.headers }, JSON.stringify(body));
   assert.equal(result.status, 200);
   assert.deepEqual(JSON.parse(result.body), JSON.parse(Buffer.from(expected.body)));
@@ -274,10 +294,21 @@ test("rtk-pxpipe applies RTK before the real library over HTTP and WS; models ga
   const excluded = await request(proxy.url + context.path, { method: "POST", headers: context.headers }, JSON.stringify({ ...body, model: "other-model" }));
   assert.equal(excluded.status, 200);
   assert.deepEqual(JSON.parse(excluded.body), { ...JSON.parse(context.body), model: "other-model" });
+  assert.deepEqual(measurements[0].stages.map(s => s.name), withHeadroom ? ["rtk", "headroom", "pxpipe"] : ["rtk", "pxpipe"]);
+  assert.deepEqual(measurements[1].stages.map(s => s.name), measurements[0].stages.map(s => s.name));
   assert.ok(measurements[0].stages[0].saved > 0);
-  assert.ok(measurements[0].stages[1].saved > 0);
-  assert.equal(measurements[2].stages[1].saved, 0);
+  assert.ok(measurements[0].stages.at(-1).saved > 0);
+  assert.equal(measurements[2].stages.at(-1).reason, "model_excluded");
+  assert.equal(measurements[2].changed, true);
+  if (withHeadroom) {
+    assert.equal(headroomCalls, 3);
+    assert.equal(measurements[2].stages[1].applied, false);
+    assert.equal((await request(proxy.url + context.path, { method: "POST", headers: context.headers }, JSON.stringify(body))).status, 502);
+    assert.equal(measurements[3].error, true);
+    assert.deepEqual(measurements[3].stages.map(s => s.name), ["rtk"], "Stop before pxpipe on Headroom failure");
+  }
 });
+}
 
 test("HTTP preserves method, encoded path/query, auth, compressed bytes, cookies and redirects", { timeout: 10000 }, async t => {
   const body = gzipSync(Buffer.from('{"input":"caffè ☕"}'));

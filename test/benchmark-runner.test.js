@@ -52,6 +52,61 @@ test("multi-model comparison validates explicit unique model IDs and conflicting
   assert.throws(() => normalizeBenchmarkOptions({ compareModels: comparisonModels, model: "gpt-6-astra" }), /model/i);
 });
 
+test("live streaming is Responses-only, explicit and does not mutate caller fixtures", () => {
+  for (const responsesStream of ["true", 1, null]) {
+    assert.throws(() => normalizeBenchmarkOptions({ responsesStream }), /responsesStream must be boolean/);
+  }
+  const fixtures = builtInFixtures().filter(f => f.id.endsWith("-short-output"));
+  for (const f of fixtures) {
+    f.body.stream = true; f.body.stream_options = { include_usage: true };
+    if (f.format === "responses") { f.body.background = true; f.body.store = true; }
+  }
+  const snapshot = structuredClone(fixtures);
+  const options = { fixtures, presets: ["none"], live: true, upstream: "http://127.0.0.1:1", repetitions: 1, warmup: 0 };
+  for (const responsesStream of [undefined, false, true]) {
+    const prepared = prepareBenchmark({ ...options, responsesStream });
+    for (const f of prepared.fixtures) {
+      assert.equal(f.body.stream, f.format === "responses" && responsesStream === true);
+      assert.equal(f.body.stream_options, undefined);
+      if (f.format === "responses") {
+        assert.equal(f.body.store, false); assert.equal(Object.hasOwn(f.body, "background"), false);
+      }
+    }
+  }
+  assert.deepEqual(fixtures, snapshot);
+});
+
+test("CLI Responses SSE routes to a local mock and scores finalized items with terminal usage", async t => {
+  let requests = 0;
+  const upstream = await serve(t, async (req, res) => {
+    const body = await json(req); requests++;
+    assert.equal(body.stream, true); assert.equal(body.store, false);
+    assert.equal(Object.hasOwn(body, "background"), false);
+    assert.deepEqual(body.reasoning, { effort: "low" });
+    res.setHeader("content-type", "text/event-stream");
+    const events = [
+      { type: "response.output_text.delta", delta: "CHECKOUT_BROKEN" },
+      { type: "response.output_item.done", output_index: 0, item: { id: "msg_test", type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: "CHECKOUT_BROKEN" }] } },
+      { type: "response.completed", response: { status: "completed", output: [], usage: { input_tokens: 100, output_tokens: 5 } } },
+    ];
+    res.end(events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""));
+  });
+  const dir = await mkdtemp(join(tmpdir(), "aih-benchmark-sse-cli-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const f = fixture(); f.body.reasoning = { effort: "low" }; f.body.background = true;
+  const file = join(dir, "fixtures.json"), out = join(dir, "out");
+  await writeFile(file, JSON.stringify([f]));
+  await exec(process.execPath, ["scripts/bench-proxy.js", "--fixtures", file, "--presets", "none", "--live", "--responses-stream", "--upstream", upstream, "--warmup", "0", "--repetitions", "1", "--max-live-calls", "1", "--out", out], { windowsHide: true });
+  const report = JSON.parse(await readFile(join(out, "report.json"), "utf8"));
+  assert.equal(requests, 1); assert.equal(report.meta.completed, true);
+  assert.equal(report.meta.config.responsesStream, true);
+  assert.equal(report.meta.fixtures[0].reasoningEffort, "low");
+  const row = report.records[0];
+  assert.equal(row.status, "ok"); assert.equal(row.answerQuality.status, "pass");
+  assert.equal(row.live.complete, true); assert.equal(row.live.outputFromFinalizedItems, true);
+  assert.equal(row.live.usage.inputTokens, 100); assert.equal(row.live.usage.outputTokens, 5);
+});
+
 test("multi-model preparation clones the same corpus, preserving protocols, checks and caller fixtures", () => {
   const fixtures = builtInFixtures().filter(f => f.id.endsWith("-short-output"));
   const snapshot = structuredClone(fixtures);
@@ -73,11 +128,12 @@ test("multi-model preparation clones the same corpus, preserving protocols, chec
 
 test("multi-model live-call ceiling covers all models, flows and warmups together", () => {
   const options = { fixtures: [fixture()], compareModels: comparisonModels, live: true,
-    upstream: "http://127.0.0.1:1", repetitions: 9, warmup: 1, maxLiveCalls: 119 };
-  assert.throws(() => prepareBenchmark(options), /120 calls, exceeding maxLiveCalls=119/);
-  const prepared = prepareBenchmark({ ...options, maxLiveCalls: 120 });
+    upstream: "http://127.0.0.1:1", repetitions: 9, warmup: 1, maxLiveCalls: 139 };
+  assert.throws(() => prepareBenchmark(options), /140 calls, exceeding maxLiveCalls=139/);
+  const prepared = prepareBenchmark({ ...options, maxLiveCalls: 140 });
+  assert.ok(prepared.options.presets.includes("rtk-headroom-pxpipe"));
   assert.equal(prepared.cases.length * prepared.options.presets.length *
-    (prepared.options.repetitions + prepared.options.warmup), 120);
+    (prepared.options.repetitions + prepared.options.warmup), 140);
 });
 
 test("multi-model offline replay shares a corpus and keeps report groups separate", async () => {
@@ -269,4 +325,23 @@ test("multi-model CLI lists, exports and replays the requested model IDs", async
   assert.equal(report.records.length, 2);
   assert.deepEqual(new Set(report.summaries.map(s => s.model)), new Set(comparisonModels));
   await assert.rejects(exec(process.execPath, [...common, "--model", "gpt-6-astra", "--list"], { windowsHide: true }));
+});
+
+test("quality CLI exports unexpanded fixtures and replays native-bypass as a distinct flow", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "aih-quality-cli-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = join(dir, "quality.json"), out = join(dir, "out");
+  await exec(process.execPath, ["scripts/bench-proxy.js", "--suite", "quality", "--formats", "responses", "--export-fixtures", file], { windowsHide: true });
+  const exported = JSON.parse(await readFile(file, "utf8"));
+  assert.equal(exported.length, 12);
+  const tiny = exported.find(f => f.id === "responses-native-short-control");
+  await writeFile(file, JSON.stringify([tiny]));
+  await exec(process.execPath, ["scripts/bench-proxy.js", "--fixtures", file, "--presets", "pxpipe-native-bypass", "--warmup", "0", "--repetitions", "1", "--out", out], { windowsHide: true });
+  const report = JSON.parse(await readFile(join(out, "report.json"), "utf8"));
+  assert.equal(report.records.length, 2);
+  const record = report.records.find(r => r.preset === "pxpipe-native-bypass");
+  assert.equal(record.status, "ok"); assert.equal(record.nativeImagePolicy, "bypass");
+  assert.equal(record.imageIntegrity.retained, 1); assert.equal(record.evidence.status, "native_image_required");
+  assert.equal(record.stages[0].reason, "native_images_present");
+  await assert.rejects(exec(process.execPath, ["scripts/bench-proxy.js", "--fixtures", file, "--suite", "quality", "--list"], { windowsHide: true }));
 });

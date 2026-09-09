@@ -85,6 +85,23 @@ test("offline savings and preservation never declare a semantic-quality winner",
   }
 });
 
+test("image integrity failures and leaked visual evidence cannot win despite passing answers", () => {
+  const intact = { status: "pass", before: 1, after: 1, retained: 1, addedOrChanged: 0 };
+  const damaged = { status: "fail", before: 1, after: 1, retained: 0, addedOrChanged: 1 };
+  const baseline = row("none", { imageIntegrity: intact });
+  const broken = row("pxpipe", { imageIntegrity: damaged, live: live(20) });
+  const report = buildReport(run([baseline, broken], { mode: "live" }));
+  assert.ok(candidate(report, "pxpipe").reasons.includes("native_image_regression"));
+  assert.equal(candidate(report, "pxpipe").qualityPassRate, 100);
+  assert.equal(report.summaries.find(s => s.preset === "pxpipe").nativeImages.failed, 1);
+  assert.match(reportMarkdown(report), /Images and evidence coverage/);
+  assert.match(reportCsv(report), /nativeImagesRetained/);
+  const unmeasured = row("none", { before: { ...tokens(), images: 1 } });
+  assert.ok(candidate(buildReport(run([unmeasured, broken], { mode: "live" })), "pxpipe").reasons.includes("baseline_native_image_integrity_unmeasured"));
+  const leak = row("pxpipe", { evidence: { kind: "rendered_context", nativeEvidenceCount: 1, status: "answer_evidence_in_native_text" }, stages: [{ name: "pxpipe", applied: true }] });
+  assert.ok(candidate(buildReport(run([row(), leak], { mode: "live" })), "pxpipe").reasons.includes("vision_evidence_not_discriminating"));
+});
+
 test("decision eligibility gates failed/missing baselines, aborted runs and incomplete coverage", () => {
   const failedBaseline = row("none", { status: "error", answerQuality: undefined, live: undefined });
   assert.ok(candidate(buildReport(run([failedBaseline, row("rtk")], { mode: "live" })), "rtk").reasons.includes("baseline_missing_failed_or_incomplete"));

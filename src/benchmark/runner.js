@@ -9,17 +9,25 @@ import WebSocket, { WebSocketServer } from "ws";
 import { startProxy } from "../proxy.js";
 import { normalizePresetOptions } from "../proxy-presets.js";
 import { builtInFixtures, validateFixtures } from "./fixtures.js";
-import { evaluatePreservation, evaluateAnswer } from "./quality.js";
+import { evaluatePreservation, evaluateAnswer, evaluateEvidence } from "./quality.js";
+import { compareRequestImages } from "../request-images.js";
 import { measureRequest } from "./measurement.js";
 import { callProvider, validateUpstream, readLimited } from "./live.js";
 
-export const BENCHMARK_PRESETS = ["none", "headroom", "rtk", "pxpipe", "headroom-pxpipe", "rtk-pxpipe"];
+export const BENCHMARK_PRESETS = ["none", "headroom", "rtk", "pxpipe", "headroom-pxpipe", "rtk-pxpipe", "rtk-headroom-pxpipe"];
+export const SUPPORTED_BENCHMARK_PRESETS = [...BENCHMARK_PRESETS, ...BENCHMARK_PRESETS.filter(p => p.includes("pxpipe")).map(p => `${p}-native-bypass`)];
+function flowOptions(flow) {
+  const bypass = flow.endsWith("-native-bypass");
+  return { preset: bypass ? flow.slice(0, -"-native-bypass".length) : flow, pxpipeNativeImages: bypass ? "bypass" : "allow" };
+}
 const exec = promisify(execFile);
 const digest = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
 export function normalizeBenchmarkOptions(options = {}) {
   const presets = options.presets || BENCHMARK_PRESETS;
-  if (!Array.isArray(presets) || !presets.length || new Set(presets).size !== presets.length || presets.some(p => !BENCHMARK_PRESETS.includes(p))) throw new Error("presets must be a unique nonempty list of supported presets");
+  if (!Array.isArray(presets) || !presets.length || new Set(presets).size !== presets.length || presets.some(p => !SUPPORTED_BENCHMARK_PRESETS.includes(p))) throw new Error("presets must be a unique nonempty list of supported presets");
+  if (options.suite !== undefined && !["core", "quality", "all"].includes(options.suite)) throw new Error("suite must be core, quality or all");
+  if (options.fixtures && options.suite !== undefined) throw new Error("Use fixtures OR suite, not both");
   // Every comparison includes a concurrently replayed baseline, not old global stats.
   const normalized = { ...options, presets: [...new Set(["none", ...presets])],
     repetitions: options.repetitions ?? 3, warmup: options.warmup ?? 1,
@@ -36,6 +44,7 @@ export function normalizeBenchmarkOptions(options = {}) {
     if (options.model !== undefined) throw new Error("Use model OR compareModels, not both");
     if (!Array.isArray(options.compareModels) || !options.compareModels.length || new Set(options.compareModels).size !== options.compareModels.length || options.compareModels.some(m => typeof m !== "string" || !/^[\w./:-]+$/.test(m))) throw new Error("compareModels must be a unique nonempty list of model IDs");
   }
+  if (options.responsesStream !== undefined && typeof options.responsesStream !== "boolean") throw new Error("responsesStream must be boolean");
   if (normalized.live) {
     if (!options.upstream) throw new Error("--live requires --upstream (provider root, before /v1)");
     normalized.upstream = validateUpstream(options.upstream);
@@ -137,15 +146,16 @@ async function replay(proxy, fixture, transport, id, options) {
 
 export function prepareBenchmark(inputOptions = {}) {
   const options = normalizeBenchmarkOptions(inputOptions);
-  let fixtures = structuredClone(options.fixtures || builtInFixtures({ model: options.model, formats: options.formats }));
+  let fixtures = structuredClone(options.fixtures || builtInFixtures({ model: options.model, formats: options.formats, suite: options.suite }));
+  if (!fixtures.length) throw new Error("No fixtures for requested suite/formats; quality suite currently supports Responses only");
   if (options.formats) fixtures = fixtures.filter(f => options.formats.includes(f.format));
   if (options.model) for (const fixture of fixtures) fixture.body.model = options.model;
   if (options.compareModels) fixtures = options.compareModels.flatMap(model => fixtures.map(fixture => ({
     ...structuredClone(fixture), id: `${fixture.id}@${model}`, body: { ...structuredClone(fixture.body), model },
   })));
   if (options.live) for (const { body, format } of fixtures) {
-    body.stream = false; delete body.stream_options;
-    if (format === "responses") { body.store = false; body.background = false; }
+    body.stream = format === "responses" && Boolean(options.responsesStream); delete body.stream_options;
+    if (format === "responses") { body.store = false; delete body.background; }
     if (Array.isArray(body.tools) && body.tools.some(tool => format === "anthropic" ? tool.type && tool.type !== "custom" : tool.type !== "function")) {
       throw new Error("Live fixtures support client function tools only, not provider-hosted tools");
     }
@@ -179,22 +189,28 @@ export async function runBenchmark(inputOptions = {}) {
     schemaVersion: 1, startedAt: new Date().toISOString(), mode: options.live ? "live" : "offline",
     presets: options.presets, repetitions: options.repetitions, warmup: options.warmup, seed: options.seed,
     transports: options.transports, corpusHash: digest(fixtures), fixtureCount: fixtures.length,
-    fixtures: fixtures.map(f => ({ id: f.id, category: f.category, format: f.format, model: f.body.model, hash: digest(f) })),
+    fixtures: fixtures.map(f => ({ id: f.id, category: f.category, format: f.format, model: f.body.model, hash: digest(f),
+      reasoningEffort: f.body.reasoning?.effort || null, evaluationKind: f.evaluation?.kind || null })),
+    flowConfigs: Object.fromEntries(options.presets.map(p => [p, flowOptions(p)])),
     plannedRecords: cases.length * options.presets.length * (options.repetitions + options.warmup),
     versions: { node: process.version, platform: process.platform, arch: process.arch,
       pxpipe: await packageVersion("pxpipe-proxy"), tokenizer: await packageVersion("gpt-tokenizer"),
       rtk: options.presets.some(p => p.includes("rtk")) ? await version("rtk") : null,
       headroomLocalCli: options.presets.some(p => p.includes("headroom")) ? await version("headroom") : null },
-    config: { rtkFilter: options.rtkFilter || "auto", models: options.models, compareModels: options.compareModels || null, headroomUrl: options.headroomUrl || "http://127.0.0.1:8787",
-      headroomMode: "lossy_inline", upstream: options.live ? options.upstream : null, timeoutMs: options.timeoutMs, maxOutputTokens: options.live ? options.maxOutputTokens : null, maxLiveCalls: options.live ? options.maxLiveCalls : null },
+    config: { suite: options.fixtures ? "custom" : options.suite || "core", rtkFilter: options.rtkFilter || "auto", models: options.models, compareModels: options.compareModels || null, headroomUrl: options.headroomUrl || "http://127.0.0.1:8787",
+      headroomMode: "lossy_inline", upstream: options.live ? options.upstream : null, responsesStream: Boolean(options.responsesStream), timeoutMs: options.timeoutMs, maxOutputTokens: options.live ? options.maxOutputTokens : null, maxLiveCalls: options.live ? options.maxLiveCalls : null },
     notes: ["Local token estimates are not provider billing. Native stage counts are diagnostic only.",
       "Offline preservation checks are not semantic answer-quality evidence. Image content is not OCR-validated.",
       "Benchmark-only pxpipe allowlist defaults to all fixture models. This exercises imaging, but is not a model-support or quality guarantee.",
+      "Native-bypass flow aliases skip only pxpipe when images exist before compression; other stages remain active. Production defaults are unchanged.",
+      "Image integrity checks compare native attachment content/metadata, order, grouping and adjacent text; they do not evaluate visual understanding.",
+      "Image-required evidence means expected literals are absent from native text, not proof that an image contains legible evidence. Live evaluation is still required.",
       "First request means first request through this benchmark instance, NOT a cold external service/cache.",
       "HTTP durations include a local collector hop; WS message durations exclude connection setup (reported separately).",
       "Live mode is a fixed single-answer evaluation, not a full agent task; no tool calls or retries are executed.",
       "Provider cache state is uncontrolled; cache reads/writes are reported separately. Warmup live calls also consume tokens.",
       "Aborted/failed provider calls can still incur usage that the provider does not return; measured usage is not a complete invoice.",
+      "Call limits count runner HTTP attempts. A gateway may internally retry, fall back, or ignore output caps; inspect its logs for billed attempts and effective settings.",
       "headroomLocalCli is the installed CLI version, not proof of the remote compression service version/configuration."],
   };
   const records = [], states = new Map();
@@ -205,7 +221,7 @@ export async function runBenchmark(inputOptions = {}) {
       states.set(preset, state);
       const start = performance.now();
       try {
-        state.proxy = await startProxy({ upstream: sink.url, listen: "http://127.0.0.1:0", preset,
+        state.proxy = await startProxy({ upstream: sink.url, listen: "http://127.0.0.1:0", ...flowOptions(preset),
           headroomUrl: options.headroomUrl, rtkFilter: options.rtkFilter, models: options.models,
           maxBodyBytes: options.maxBodyBytes, onStats: event => sink.records.get(event.requestId)?.events.push(event) });
       } catch (error) { state.error = `Preset setup failed (${error.name})`; }
@@ -225,7 +241,7 @@ export async function runBenchmark(inputOptions = {}) {
           const entry = { fixture, controller, signal, events: [] };
           sink.records.set(id, entry);
           const row = { sequence, caseId: fixture.id, category: fixture.category, format: fixture.format, model: fixture.body.model,
-            transport, preset, round, phase: round < 0 ? "warmup" : "measured", firstRequest: state.attempts++ === 0,
+            transport, preset, basePreset: flowOptions(preset).preset, nativeImagePolicy: flowOptions(preset).pxpipeNativeImages, round, phase: round < 0 ? "warmup" : "measured", firstRequest: state.attempts++ === 0,
             status: "ok", before: baselines.get(fixture.id), after: null, stages: [], durationMs: null,
             preservation: null, answerQuality: null, live: null };
           const start = performance.now();
@@ -235,6 +251,8 @@ export async function runBenchmark(inputOptions = {}) {
             if (entry.error) throw new Error(entry.error);
             if (!entry.body) throw new Error("No request reached the benchmark collector");
             row.after = await measureRequest(entry.body);
+            row.imageIntegrity = compareRequestImages(fixture.body, entry.body);
+            row.evidence = evaluateEvidence(entry.body, fixture.evaluation, row.imageIntegrity);
             row.preservation = privateQuality(evaluatePreservation(fixture.body, entry.body, fixture.checks));
             row.changed = digest(fixture.body) !== digest(entry.body);
             row.outputHash = digest(entry.body);

@@ -3,7 +3,9 @@ import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { normalizeProxyOptions } from "./proxy.js";
-import { SERVICES, SERVICE_IDS, APP_REPOSITORY_URL } from "./config.js";
+import { SERVICES, SERVICE_IDS, SERVICE_PACKAGES, APP_REPOSITORY_URL } from "./config.js";
+import { compareVersions, getServiceVersions } from "./utils/versions.js";
+import { installServiceUpdate, serviceStartCommand } from "./service-updates.js";
 import { configureCodexForProxy } from "./codex-routing.js";
 import { ensureDir, getAihDir, getLogsDir, getServiceLogPath, getStateFilePath } from "./utils/path.js";
 import {
@@ -19,6 +21,107 @@ import {
 import { formatBytes, formatUptime, gray, red, yellow, green, cyan } from "./utils/format.js";
 
 export class ServiceManager {
+  updatesInProgress = new Set();
+
+  /** Explicit update: fresh check, stop if needed, install, verify, restore runtime state. */
+  async updateService(serviceId, { getVersions = getServiceVersions, install = installServiceUpdate } = {}) {
+    if (!Object.hasOwn(SERVICE_PACKAGES, serviceId)) {
+      return { success: false, message: serviceId === "proxy"
+        ? "The built-in proxy is part of ai-helper; update ai-helper itself to update it."
+        : `Unknown service '${serviceId}'. Available: ${SERVICE_IDS.join(", ")}` };
+    }
+    if (this.updatesInProgress.has(serviceId)) {
+      return { success: false, message: `An update for '${serviceId}' is already in progress` };
+    }
+    this.updatesInProgress.add(serviceId);
+    let stopped = false;
+    let updated = false;
+    let details = {};
+    const restart = async () => {
+      try { return await this.startService(serviceId); }
+      catch (error) { return { success: false, message: error.message }; }
+    };
+    const rememberLaunchVersion = version => {
+      if (!SERVICE_PACKAGES[serviceId].npx) return;
+      const state = this.readState();
+      const current = state.services[serviceId];
+      if (current.launchVersion === version) return;
+      current.launchVersion = version;
+      current.command = serviceStartCommand(serviceId, current);
+      this.saveState(state);
+    };
+    try {
+      const state = await this.syncState();
+      const current = state.services[serviceId] || { id: serviceId, status: "stopped" };
+      const before = (await getVersions([current]))[serviceId];
+      const latestVersion = before?.latestVersion;
+      details = { previousVersion: before?.version ?? null, latestVersion: latestVersion ?? null };
+      if (compareVersions(latestVersion, latestVersion) === null) {
+        return { ...details, success: false, message: `Cannot determine the latest version of '${serviceId}'; no changes made. Check your registry connection and retry.` };
+      }
+      const comparison = compareVersions(before.version, latestVersion);
+      if (comparison !== null && comparison >= 0) {
+        // A manual npm upgrade may have overtaken a previous explicit npx pin.
+        // Do not report current and then launch that old pin on the next start.
+        rememberLaunchVersion(before.version);
+        return { ...details, success: true, updated: false, alreadyUpToDate: true, version: before.version,
+          message: `'${serviceId}' is already up to date (${before.version})` };
+      }
+      if (current.status === "running") {
+        // stopService can throw after the process exited (e.g. state write
+        // failure). A guarded startService is safe even if it remains running.
+        stopped = true;
+        const result = await this.stopService(serviceId);
+        if (!result.success) throw new Error(`Update aborted: ${result.message}`);
+        if ((await this.syncState()).services[serviceId]?.status === "running") {
+          stopped = false; // Do not spawn a duplicate if an external supervisor revived it.
+          return { ...details, success: false, message: `Update aborted: '${serviceId}' is still running; stop its external supervisor and retry.` };
+        }
+      }
+      const installed = await install(serviceId);
+      if (!installed.success) throw new Error(`${installed.message}. See 'aih logs ${serviceId}'.`);
+      // Probe PATH, not the old daemon's health endpoint. Exit 0 alone is not
+      // evidence: native updaters can decline unsupported install methods.
+      const disk = (await getVersions([{ ...current, status: "stopped", pid: undefined }]))[serviceId];
+      const installedComparison = compareVersions(disk?.version, latestVersion);
+      if (installedComparison === null || installedComparison < 0) {
+        throw new Error(`Installer completed, but '${serviceId}' on PATH is ${disk?.version || "unverified"}, expected ${latestVersion}. Check the installation/PATH and 'aih logs ${serviceId}'`);
+      }
+      updated = true;
+      details.version = disk.version;
+      rememberLaunchVersion(disk.version);
+      let started;
+      if (stopped) {
+        stopped = false; // Only one restart attempt, including on startup failure.
+        started = await restart();
+        if (!started.success) return { ...details, success: false, updated, restarted: false,
+          message: `'${serviceId}' updated to ${disk.version}, but restart failed: ${started.message}` };
+        const running = (await this.syncState()).services[serviceId];
+        if (running?.status !== "running" || !running.pid) {
+          return { ...details, success: false, updated, restarted: false, codexConfig: started.codexConfig,
+            message: `'${serviceId}' updated, but exited after restart; check 'aih logs ${serviceId}'` };
+        }
+        const live = (await getVersions([running]))[serviceId];
+        const liveComparison = compareVersions(live?.version, latestVersion);
+        if (liveComparison === null || liveComparison < 0) {
+          return { ...details, success: false, updated, restarted: true, codexConfig: started.codexConfig,
+            message: `'${serviceId}' restarted, but its running version is ${live?.version || "unverified"} (expected ${latestVersion}); check 'aih logs ${serviceId}'` };
+        }
+        details.version = live.version;
+      }
+      return { ...details, success: true, updated, restarted: Boolean(started), codexConfig: started?.codexConfig,
+        message: `'${serviceId}' updated to ${details.version}${started ? " and restarted" : " (left stopped)"}` };
+    } catch (error) {
+      const recovery = stopped ? await restart() : null;
+      return { ...details, success: false, updated, restarted: Boolean(recovery?.success && !recovery.alreadyRunning), codexConfig: recovery?.codexConfig,
+        message: `Update failed: ${error.message}${recovery ? recovery.success
+          ? recovery.alreadyRunning ? ". Service is still running." : ". Service restarted after the failure (package rollback is not guaranteed)."
+          : `. Recovery restart failed: ${recovery.message}` : ""}` };
+    } finally {
+      this.updatesInProgress.delete(serviceId);
+    }
+  }
+
   /**
    * Reads raw state from disk without discovery.
    */
@@ -251,7 +354,8 @@ export class ServiceManager {
     }
 
     const logPath = getServiceLogPath(serviceId);
-    const { pid } = spawnDetachedProcess(def.command, logPath, {
+    const command = serviceStartCommand(serviceId, current);
+    const { pid } = spawnDetachedProcess(command, logPath, {
       env: def.env,
       cwd: def.workingDir,
     });
@@ -259,7 +363,8 @@ export class ServiceManager {
     state.services[serviceId] = {
       id: def.id,
       name: def.name,
-      command: def.command,
+      command,
+      ...(current?.launchVersion ? { launchVersion: current.launchVersion } : {}),
       status: "running",
       pid,
       startedAt: new Date().toISOString(),

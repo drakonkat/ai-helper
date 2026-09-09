@@ -253,28 +253,33 @@ export async function fetchJson(url, timeoutMs = 2000) {
 
 /**
  * Resolves the operational pipeline the AI calls flow through.
- * The static chain (client -> headroom -> pxpipe -> upstream) is derived from
- * the managed services; headroom's /health is used to confirm the live wiring
- * and is optional, so the panel still renders when headroom is down.
- * @param {Array<{ id: string; status: string; url?: string }>} statuses
+ * Native topology uses only the proxy's configured stages and process state;
+ * an upstream URL is configuration, not proof that the destination is healthy.
+ * Without a proxy, legacy callers may still probe headroom's /health. Set
+ * nativeOnly to prevent that fallback when native proxy status is unavailable.
+ * @param {Array<{ id: string; status: string; url?: string; proxyOptions?: object }>} statuses
+ * @param {{ nativeOnly?: boolean }} [options]
  * @returns {Promise<{ nodes: Array<{ id: string; label: string; state: string; detail: string }>; health: any | null }>}
  */
-export async function probeChain(statuses) {
+export async function probeChain(statuses, { nativeOnly = false } = {}) {
   const byId = {};
   for (const svc of statuses || []) byId[svc.id] = svc;
 
   const proxy = byId.proxy;
-  if (proxy?.proxyOptions) {
-    const preset = proxy.proxyOptions.preset || "none";
-    const stages = preset === "none" ? [] : preset.split("-").map(id => ({
-      id, label: id === "pxpipe" ? "pxpipe (libreria)" : id === "rtk" ? "rtk (pipe)" : "headroom (compress)",
-      state: id === "pxpipe" ? proxy.status : "static", detail: id === "headroom" ? proxy.proxyOptions.headroomUrl : "",
+  if (proxy || nativeOnly) {
+    const options = proxy?.proxyOptions || {};
+    const preset = typeof options.preset === "string" ? options.preset : "none";
+    const labels = { pxpipe: "pxpipe (libreria)", rtk: "rtk (pipe)", headroom: "headroom (compress)" };
+    const stages = preset.split("-").filter(id => Object.hasOwn(labels, id)).map(id => ({
+      id, label: labels[id],
+      state: id === "pxpipe" ? proxy?.status || "unknown" : "static",
+      detail: id === "headroom" ? options.headroomUrl || "" : "",
     }));
     return { nodes: [
       { id: "client", label: "client", state: "static", detail: "AI agents / CLI" },
-      { id: "proxy", label: "aih proxy", state: proxy.status, detail: proxy.url },
+      { id: "proxy", label: "aih proxy", state: proxy?.status || "unknown", detail: proxy?.url || "" },
       ...stages,
-      { id: "upstream", label: "upstream", state: "static", detail: proxy.proxyOptions.upstream },
+      { id: "upstream", label: "upstream", state: "unknown", detail: options.upstream || "" },
     ], health: null };
   }
 

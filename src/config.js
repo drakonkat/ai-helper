@@ -55,6 +55,14 @@ export const SERVICES = {
 
 export const SERVICE_IDS = Object.keys(SERVICES);
 
+// Shared by read-only version probes and explicit service updates.
+export const SERVICE_PACKAGES = {
+  pxpipe: { name: "pxpipe-proxy", bin: "pxpipe", npx: true },
+  ocx: { name: "@bitkyc08/opencodex", bin: "ocx", health: "/healthz", service: "opencodex" },
+  agentmemory: { name: "@agentmemory/agentmemory", bin: "agentmemory", npx: true, health: "/agentmemory/health", service: "agentmemory" },
+  headroom: { name: "headroom-ai", bin: "headroom", health: "/health", pypi: true },
+};
+
 export const APP_NAME = "ai-helper";
 export const CLI_NAME = "aih";
 export const VERSION = packageInfo.version;

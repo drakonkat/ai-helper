@@ -1,5 +1,7 @@
 // Deterministic preservation checks are a lower bound on quality, not a semantic
 // judge. In particular, rendering text into an image does not prove it is readable.
+import { isDeepStrictEqual } from "node:util";
+import { compareRequestImages } from "../request-images.js";
 const IMAGE_TYPES = new Set(["image", "input_image", "image_url"]);
 
 function contentTexts(value) {
@@ -31,7 +33,7 @@ function toolTexts(body) {
   return result;
 }
 
-function requestTexts(body) {
+export function requestTexts(body) {
   if (!body || typeof body !== "object") return [];
   const result = [...contentTexts(body.instructions), ...contentTexts(body.system)];
   if (typeof body.input === "string") result.push(withoutDataUrls(body.input));
@@ -46,12 +48,6 @@ function requestTexts(body) {
     if (typeof definition?.description === "string") result.push(withoutDataUrls(definition.description));
   }
   return result;
-}
-
-function hasImages(value) {
-  if (!value || typeof value !== "object") return false;
-  if (IMAGE_TYPES.has(value.type)) return true;
-  return Object.values(value).some(child => Array.isArray(child) ? child.some(hasImages) : hasImages(child));
 }
 
 function toolStructure(body) {
@@ -93,7 +89,9 @@ function strings(value, key) {
 export function evaluatePreservation(originalBody, transformedBody, checks = {}) {
   if (!checks || typeof checks !== "object" || Array.isArray(checks)) throw new Error("checks must be an object");
   const results = [];
-  const images = hasImages(transformedBody);
+  const imageIntegrity = compareRequestImages(originalBody, transformedBody);
+  // Unchanged user attachments cannot be evidence that removed tool text was imaged.
+  const images = imageIntegrity.addedOrChanged > 0;
   for (const [scope, extract] of [["toolIncludes", toolTexts], ["requestIncludes", requestTexts]]) {
     const original = extract(originalBody);
     const transformed = extract(transformedBody);
@@ -124,13 +122,51 @@ export function evaluatePreservation(originalBody, transformedBody, checks = {})
     const name = tool?.function?.name || tool?.name;
     if (typeof name === "string") results.push({ id: `structure:tool_definition:${name}`, kind: "structure", status: names.has(name) ? "pass" : "fail", reason: names.has(name) ? "tool_definition_preserved" : "tool_definition_missing" });
   }
+  results.push(...imageIntegrity.checks);
   return summarize(results);
+}
+
+export function validateAnswerChecks(value, where = "answerChecks") {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${where} must be an object`);
+  for (const key of Object.keys(value)) {
+    if (!["includes", "excludes", "exact", "jsonEquals", "maxChars"].includes(key)) throw new Error(`${where}.${key} is unknown`);
+    if (["includes", "excludes"].includes(key)) {
+      if (!Array.isArray(value[key])) throw new Error(`${where}.${key} must be an array of nonempty strings`);
+      strings(value[key], `${where}.${key}`);
+    }
+    if (key === "exact" && (typeof value[key] !== "string" || !value[key].trim())) throw new Error(`${where}.exact must be nonempty text`);
+    if (key === "maxChars" && (!Number.isSafeInteger(value[key]) || value[key] < 1)) throw new Error(`${where}.maxChars must be a positive integer`);
+    if (key === "jsonEquals") {
+      let valid = false;
+      try { valid = value[key] !== null && typeof value[key] === "object" && isDeepStrictEqual(value[key], JSON.parse(JSON.stringify(value[key]))); } catch {}
+      if (!valid) throw new Error(`${where}.jsonEquals must be a JSON object or array`);
+    }
+  }
+}
+
+function parseStrictJson(text) {
+  const value = JSON.parse(text);
+  // JSON.parse otherwise silently accepts conflicting duplicate keys. Tokens are
+  // scanned only after syntax validation; escaped/unicode-equivalent keys collide.
+  const tokens = text.match(/"(?:\\[\s\S]|[^"\\])*"|[{}\[\]:,]/g) || [], stack = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (token === "{") stack.push(new Set());
+    else if (token === "[") stack.push(null);
+    else if (token === "}" || token === "]") stack.pop();
+    else if (token.startsWith('"') && tokens[i + 1] === ":") {
+      const key = JSON.parse(token), keys = stack.at(-1);
+      if (keys?.has(key)) throw new Error("Duplicate JSON key");
+      keys?.add(key);
+    }
+  }
+  return value;
 }
 
 /** Exact, case-sensitive answer checks; no assertions means explicitly unscored. */
 export function evaluateAnswer(text, answerChecks) {
   if (answerChecks === undefined || answerChecks === null) return summarize([]);
-  if (typeof answerChecks !== "object" || Array.isArray(answerChecks)) throw new Error("answerChecks must be an object");
+  validateAnswerChecks(answerChecks);
   const results = [];
   for (const kind of ["includes", "excludes"]) {
     strings(answerChecks[kind], `answerChecks.${kind}`).forEach((expected, index) => {
@@ -140,5 +176,31 @@ export function evaluateAnswer(text, answerChecks) {
         reason: typeof text !== "string" ? "no_text_answer" : kind === "includes" ? "required_answer_text" : "forbidden_answer_text" });
     });
   }
+  for (const kind of ["exact", "jsonEquals", "maxChars"]) {
+    if (!Object.hasOwn(answerChecks, kind)) continue;
+    const expected = answerChecks[kind];
+    let passed = false, reason = kind === "jsonEquals" ? "answer_json_mismatch" : `answer_${kind}_mismatch`;
+    if (typeof text === "string") {
+      if (kind === "exact") passed = text.trim() === expected.trim();
+      if (kind === "maxChars") passed = text.length <= expected;
+      if (kind === "jsonEquals") {
+        try { passed = isDeepStrictEqual(parseStrictJson(text), expected); }
+        catch { reason = "answer_not_strict_json"; }
+      }
+    }
+    results.push({ id: `${kind}:0`, kind, expected, status: typeof text !== "string" ? "indeterminate" : passed ? "pass" : "fail",
+      reason: typeof text !== "string" ? "no_text_answer" : passed ? `answer_${kind}_matched` : reason });
+  }
   return summarize(results);
+}
+
+/** Evidence location, not OCR validation: generated images may or may not contain the missing text. */
+export function evaluateEvidence(body, evaluation, imageIntegrity) {
+  if (!evaluation) return null;
+  const text = requestTexts(body).join("\n");
+  const native = evaluation.evidence.filter(value => text.includes(value)).length;
+  const status = native ? "answer_evidence_in_native_text" : evaluation.kind === "native_image"
+    ? imageIntegrity.missingOrChanged ? "native_image_lost" : imageIntegrity.before ? "native_image_required" : "no_native_image"
+    : imageIntegrity.addedOrChanged ? "rendered_image_required" : "evidence_missing_without_image";
+  return { kind: evaluation.kind, status, nativeEvidenceCount: native, totalEvidenceCount: evaluation.evidence.length };
 }

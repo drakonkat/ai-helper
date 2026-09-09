@@ -2,9 +2,10 @@ import { spawn } from "node:child_process";
 import { promisify } from "node:util";
 import zlib from "node:zlib";
 import { tokenStage } from "./proxy-stats.js";
+import { requestImages } from "./request-images.js";
 
 // Fixed recipes; the user's --interceptor runs afterwards and can inspect/edit the result.
-const PRESETS = ["none", "pxpipe", "headroom", "rtk", "headroom-pxpipe", "rtk-pxpipe"];
+const PRESETS = ["none", "pxpipe", "headroom", "rtk", "headroom-pxpipe", "rtk-pxpipe", "rtk-headroom-pxpipe"];
 const DECODERS = { gzip: promisify(zlib.gunzip), deflate: promisify(zlib.inflate), br: promisify(zlib.brotliDecompress),
   ...(typeof zlib.zstdDecompress === "function" ? { zstd: promisify(zlib.zstdDecompress) } : {}) };
 
@@ -19,7 +20,9 @@ export function normalizePresetOptions(options) {
   }
   const rtkFilter = options.rtkFilter || undefined;
   if (rtkFilter && !/^[a-z][a-z0-9-]*$/.test(rtkFilter)) throw new Error("Invalid rtk filter name");
-  return { preset, models: models?.join(","), headroomUrl: headroom.href, rtkFilter };
+  const pxpipeNativeImages = options.pxpipeNativeImages ?? "allow";
+  if (!["allow", "bypass"].includes(pxpipeNativeImages)) throw new Error("pxpipeNativeImages must be allow or bypass");
+  return { preset, models: models?.join(","), headroomUrl: headroom.href, rtkFilter, pxpipeNativeImages };
 }
 
 function toolTexts(body) {
@@ -131,6 +134,8 @@ export async function createPresetHooks(config, onStats = () => {}) {
     if (typeof model !== "string" || !model) return raw;
     if (websocket) wsModels.set(context, model);
     if (format === "responses" ? !(typeof body.input === "string" || Array.isArray(body.input)) : !Array.isArray(body.messages)) return raw;
+    // Snapshot BEFORE RTK/Headroom. A prior stage dropping an attachment must not enable imaging.
+    const bypassPxpipe = px && config.pxpipeNativeImages === "bypass" && requestImages(body, { identities: false }).length > 0;
     let changed = false;
     const stages = [];
     const report = error => {
@@ -140,12 +145,8 @@ export async function createPresetHooks(config, onStats = () => {}) {
       try { onStats({ model, preset: config.preset, transport: websocket ? "WS" : "HTTP", changed, stages, error, ...(requestId ? { requestId } : {}) }); } catch {}
     };
     try {
-      if (config.preset.startsWith("headroom")) {
-        const before = JSON.stringify(body);
-        stages.push(await headroom(body, model));
-        changed = JSON.stringify(body) !== before;
-      }
-      if (config.preset === "rtk" || config.preset === "rtk-pxpipe") {
+      // Fixed stage order, including the triple recipe: RTK -> Headroom -> pxpipe.
+      if (config.preset === "rtk" || config.preset.startsWith("rtk-")) {
         let before = 0, after = 0, applied = false;
         for (const [object, key] of toolTexts(body)) {
           before += countTokens(object[key]);
@@ -160,7 +161,15 @@ export async function createPresetHooks(config, onStats = () => {}) {
         }
         stages.push(tokenStage("rtk", before, after, applied, applied ? "applied" : "unchanged", "o200k_estimate"));
       }
-      if (px && (models ? models.some(m => m.endsWith("*") ? model.startsWith(m.slice(0, -1)) : model === m) : px.isPxpipeSupportedModel(model) || px.isPxpipeSupportedGptModel(model))) {
+      if (config.preset.split("-").includes("headroom")) {
+        const before = JSON.stringify(body);
+        stages.push(await headroom(body, model));
+        // A Headroom no-op must not discard changes already made by RTK.
+        changed = JSON.stringify(body) !== before || changed;
+      }
+      if (bypassPxpipe) {
+        stages.push(tokenStage("pxpipe", 0, 0, false, "native_images_present", "pxpipe_estimate"));
+      } else if (px && (models ? models.some(m => m.endsWith("*") ? model.startsWith(m.slice(0, -1)) : model === m) : px.isPxpipeSupportedModel(model) || px.isPxpipeSupportedGptModel(model))) {
         const bytes = Buffer.from(JSON.stringify({ ...body, model }));
         const options = { model };
         const result = await (format === "anthropic" ? px.transformRequest(bytes, options)
