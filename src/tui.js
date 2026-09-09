@@ -19,6 +19,7 @@ import {
 } from "./utils/format.js";
 import { killProcessTree } from "./utils/process.js";
 import { readProxyStats, proxyStatsLines } from "./proxy-stats.js";
+import { getServiceVersions } from "./utils/versions.js";
 import {
   baseUrl,
   diffRates,
@@ -30,6 +31,8 @@ import {
 } from "./utils/metrics.js";
 
 const TICK_MS = 1000;
+const STALE_MS = 5 * TICK_MS;
+const VERSION_CHECK_MS = 5 * 60 * 1000;
 const MAX_EVENTS = 200;
 
 const ALT_SCREEN_ON = "\x1b[?1049h";
@@ -106,33 +109,81 @@ function pct(value) {
   return `${(value * 100).toFixed(1)}%`;
 }
 
+function age(timestamp, now) {
+  const seconds = Math.max(0, Math.floor((now - timestamp) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  return `${Math.floor(seconds / 3600)}h`;
+}
+
+/** Wrap complete fields, falling back to words for long descriptions. */
+function wrapCells(cells, width, separator = "  |  ", indent = "  ") {
+  const lines = [];
+  let line = indent;
+  for (const cell of cells) {
+    if (stripAnsi(cell).length > width - indent.length) {
+      if (line !== indent) lines.push(line);
+      line = indent;
+      for (const word of cell.split(" ")) {
+        if (line !== indent && stripAnsi(line + " " + word).length > width) {
+          lines.push(line);
+          line = indent;
+        }
+        line += (line === indent ? "" : " ") + word;
+      }
+      continue;
+    }
+    const next = line === indent ? cell : dim(separator) + cell;
+    if (line !== indent && stripAnsi(line + next).length > width) {
+      lines.push(line);
+      line = indent + (separator === " -> " ? dim("-> ") : "") + cell;
+    } else line += next;
+  }
+  if (line !== indent) lines.push(line);
+  return lines.map(line => clip(line, width));
+}
+
 /**
  * Colours a pipeline node by its live state.
  * @param {{ label: string; state: string }} node
  * @returns {string}
  */
 function paintNode(node) {
-  const label = `[ ${node.label} ]`;
   switch (node.state) {
+    case "healthy":
+      return green(`[ ${node.label}: verificato ]`);
     case "running":
-      return green(bold(label));
+      return `[ ${node.label}: processo attivo ]`;
     case "error":
-      return red(bold(label));
+      return red(bold(`[ ${node.label}: errore ]`));
     case "stopped":
-      return gray(label);
+      return dim(`[ ${node.label}: fermo ]`);
+    case "static":
+      return `[ ${node.label} ]`;
     default:
-      return dim(label);
+      return yellow(`[ ${node.label}: non verificato ]`);
   }
 }
 
 export class Dashboard {
-  constructor() {
+  constructor({ getVersions = getServiceVersions } = {}) {
     this.statuses = [];
+    this.getVersions = getVersions;
+    this.versions = {};
+    this.versionsKey = "";
+    this.versionsAt = 0;
+    this.versionsLoading = false;
     this.metrics = null;
+    this.metricsAt = null;
+    this.metricsError = null;
+    this.metricsKey = "";
+    this.sampleMs = null;
     this.rates = {};
     this.prevMetrics = null;
     this.prevAt = 0;
     this.chain = [];
+    this.chainAt = null;
+    this.showPipelineDetails = false;
     this.health = null;
     this.events = [];
     this.eventsOffset = undefined;
@@ -153,6 +204,30 @@ export class Dashboard {
     return this.statuses[this.selected];
   }
 
+  /** Checks versions independently of the one-second status/metrics refresh. */
+  async refreshVersions() {
+    const key = JSON.stringify(this.statuses.map(s => [s.id, s.status, s.pid, s.url]));
+    if (key !== this.versionsKey) {
+      this.versionsKey = key;
+      this.versionsAt = 0;
+      this.versions = {};
+    }
+    if (this.versionsLoading || (this.versionsAt && Date.now() - this.versionsAt < VERSION_CHECK_MS)) return;
+
+    this.versionsLoading = true;
+    try {
+      const versions = await this.getVersions(this.statuses);
+      if (key === this.versionsKey) this.versions = versions;
+    } catch {
+      // An unavailable registry must not interrupt service controls or metrics.
+      if (key === this.versionsKey) this.versions = {};
+    } finally {
+      if (key === this.versionsKey) this.versionsAt = Date.now();
+      this.versionsLoading = false;
+      this.render();
+    }
+  }
+
   /**
    * One data tick. Every source is optional: a failing fetch degrades its own
    * panel and never breaks the loop.
@@ -162,6 +237,7 @@ export class Dashboard {
     this.refreshing = true;
     try {
       this.statuses = await manager.getStatus();
+      void this.refreshVersions();
       if (this.selected >= this.statuses.length) {
         this.selected = Math.max(0, this.statuses.length - 1);
       }
@@ -169,22 +245,35 @@ export class Dashboard {
       const headroom = this.statuses.find(s => s.id === "headroom");
       const headroomBase = headroom && headroom.status === "running" ? baseUrl(headroom.url) : "";
 
-      const metricsText = headroomBase ? await fetchText(`${headroomBase}/metrics`, 2000) : null;
-      if (metricsText) {
-        const parsed = parseProm(metricsText);
-        const now = Date.now();
-        this.rates = diffRates(this.prevMetrics, parsed, now - this.prevAt);
+      const metricsKey = JSON.stringify([headroomBase, headroom?.pid]);
+      if (metricsKey !== this.metricsKey) this.prevMetrics = null;
+      this.metricsKey = metricsKey;
+      const [metricsText, probed] = await Promise.all([
+        headroomBase ? fetchText(`${headroomBase}/metrics`, 2000) : null,
+        probeChain(this.statuses),
+      ]);
+      const parsed = parseProm(metricsText);
+      const now = Date.now();
+      if (Object.keys(parsed).some(name => name.startsWith("headroom_"))) {
+        this.sampleMs = this.prevMetrics ? now - this.prevAt : null;
+        this.rates = diffRates(this.prevMetrics, parsed, this.sampleMs);
         this.prevMetrics = parsed;
         this.prevAt = now;
         this.metrics = parsed;
+        this.metricsAt = now;
+        this.metricsError = null;
       } else {
-        this.metrics = null;
+        // Keep the last totals for diagnosis, never an old gauge or rate as live.
+        this.metricsError = headroom?.status !== "running" ? "Headroom non in esecuzione"
+          : !headroomBase ? "URL Headroom non disponibile"
+          : metricsText === null ? "raccolta fallita" : "risposta senza metriche Headroom";
         this.rates = {};
         this.prevMetrics = null;
+        this.sampleMs = null;
       }
 
-      const probed = await probeChain(this.statuses);
       this.chain = probed.nodes;
+      this.chainAt = now;
       this.health = probed.health;
 
       const tail = tailJsonl(this.eventsFile, this.eventsOffset, MAX_EVENTS);
@@ -197,10 +286,69 @@ export class Dashboard {
       this.savings = readSavingsBreakdown();
       this.proxyStats = readProxyStats();
     } catch (err) {
+      this.metricsError = "aggiornamento fallito";
+      this.rates = {};
+      this.prevMetrics = null;
+      this.chainAt = null;
       this.status = red(`Refresh error: ${err?.message || err}`);
     } finally {
       this.refreshing = false;
     }
+  }
+
+  /** Pipeline rows wrap whole fields rather than clipping useful values. */
+  pipelineLines(width, now = Date.now()) {
+    const lines = [bold("PIPELINE") + dim("  metriche Headroom")];
+    const add = (cells, separator) => lines.push(...wrapCells(cells, width, separator));
+    const chainFresh = this.chainAt !== null && now - this.chainAt <= STALE_MS;
+    add(this.chain.map(node => paintNode(chainFresh || node.state === "static"
+      ? node : { ...node, state: "unknown" })), " -> ");
+
+    const stale = this.metricsAt === null || Boolean(this.metricsError) || now - this.metricsAt > STALE_MS;
+    const freshness = this.metricsAt === null ? "nessun campione"
+      : `ultimo campione ${age(this.metricsAt, now)} fa`;
+    const freshnessText = stale ? yellow(`Dati non aggiornati: ${freshness}`) : `Aggiornati ${age(this.metricsAt, now)} fa`;
+    if (stripAnsi(lines[0] + "  |  " + freshnessText).length <= width) lines[0] += dim("  |  ") + freshnessText;
+    else add([freshnessText]);
+    if (this.metricsError) add([yellow(this.metricsError)]);
+
+    if (this.metrics) {
+      const m = this.metrics;
+      add([bold("Adesso"), stale ? dim("attivita non disponibile")
+        : `${cyan(bold(num(m.headroom_inbound_requests_active)))} in corso`,
+      ...(stale ? [] : [`${bold(num(this.rates.headroom_requests_total, 2))} req/s`])]);
+      const input = m.headroom_tokens_input_total;
+      const saved = m.headroom_tokens_saved_total;
+      const savingRatio = Number.isFinite(input) && Number.isFinite(saved) && input + saved > 0
+        ? saved / (input + saved) : null;
+      const cacheRatio = Number.isFinite(m.headroom_requests_cached_total) && m.headroom_requests_total > 0
+        ? m.headroom_requests_cached_total / m.headroom_requests_total : null;
+      const latency = Number.isFinite(m.headroom_latency_ms_sum) && m.headroom_latency_ms_count > 0
+        ? m.headroom_latency_ms_sum / m.headroom_latency_ms_count : null;
+      const duration = latency === null ? "-" : latency < 1000 ? `${Math.round(latency)} ms` : `${(latency / 1000).toFixed(1)} s`;
+      add([bold("Dall'avvio dei contatori") + (stale ? yellow(" (ultimo campione)") : "")]);
+      add([`Token risparmiati ${bold(pct(savingRatio))}`, `Richieste cached ${bold(pct(cacheRatio))}`,
+        `Durata media ${bold(duration)}`]);
+    }
+
+    if (this.showPipelineDetails) {
+      for (const node of this.chain) {
+        if (node.detail) add([`${node.label}: ${node.detail}`]);
+        if (node.state === "running") add([yellow(`${node.label}: health non verificato`)]);
+      }
+      if (!chainFresh) add([yellow("Stati della catena non aggiornati")]);
+      if (this.metrics && !stale) {
+        add([`Token in/s ${num(this.rates.headroom_tokens_input_total, 1)}`,
+          `Token out/s ${num(this.rates.headroom_tokens_output_total, 1)}`]);
+        add([dim(this.sampleMs === null ? "Velocita: in attesa del secondo campione"
+          : `Velocita: ultimo intervallo di ${(this.sampleMs / 1000).toFixed(1)} s`)]);
+      }
+      add([dim("Token risparmiati: saved / (input + saved)")]);
+      add([dim("Richieste cached: cached / richieste totali")]);
+      add([dim("Durata media: somma latenze / campioni")]);
+      add([dim("Cache richieste != risparmio economico")]);
+    }
+    return lines.map(line => clip(line, width));
   }
 
   /**
@@ -211,6 +359,19 @@ export class Dashboard {
     const width = Math.max(40, process.stdout.columns || 100);
     const height = Math.max(12, process.stdout.rows || 30);
     const lines = [];
+    const svc = this.currentService();
+    const target = svc ? bold(svc.id) : dim("-");
+    const keyLines = wrapCells([
+      `${dim("d")} ${this.showPipelineDetails ? "riduci" : "dettagli"}`,
+      `${dim("q")} esci`,
+      `${dim("up/down")} seleziona (${target})`,
+      `${dim("s")} start`,
+      `${dim("x")} stop`,
+      `${dim("r")} restart`,
+      `${dim("k")} kill`,
+      ...(svc?.dashboardUrl ? [`${dim("o")} dashboard`] : []),
+    ], width, "  ", "");
+    const footerLines = keyLines.length + 2;
 
     const title = `${bold(cyan(APP_NAME))} ${gray("v" + VERSION)} ${dim("live dashboard")}`;
     const clock = dim(new Date().toLocaleTimeString());
@@ -222,16 +383,26 @@ export class Dashboard {
       " ",
       "SERVICE",
       "STATUS",
+      "VERSION",
+      "UPDATE",
       { header: "PID", align: "right" },
       { header: "UPTIME", align: "right" },
       "URL",
     ];
     const rows = this.statuses.map((s, idx) => {
       const active = idx === this.selected;
+      const version = this.versions[s.id];
+      const update = version?.updateAvailable === true
+        ? yellow(bold(`↑ ${version.latestVersion}`))
+        : version?.updateAvailable === false
+          ? green("aggiornato")
+          : dim(this.versionsLoading && !version ? "verifica..." : "n/d");
       return [
         active ? cyan(bold(">")) : " ",
         active ? bold(white(s.id)) : bold(s.id),
         badgeStatus(s.status),
+        version?.version || dim("n/d"),
+        update,
         s.pid ? String(s.pid) : dim("-"),
         s.status === "running" ? s.uptime : dim("-"),
         s.id === "proxy" ? dim(`${s.url} (proxy)`) : s.status === "running" && s.url && s.url !== "-" ? cyan(underline(s.url)) : dim(s.url || "-"),
@@ -252,47 +423,7 @@ export class Dashboard {
       lines.push("");
     }
 
-    lines.push(bold("PIPELINE"));
-    lines.push("  " + this.chain.map(paintNode).join(gray(" --> ")));
-
-    const details = this.chain
-      .map(n => (n.detail ? dim(`${n.label}: ${n.detail}`) : ""))
-      .filter(Boolean)
-      .join(dim("  |  "));
-    if (details) lines.push("  " + details);
-
-    if (this.metrics) {
-      const m = this.metrics;
-      const r = this.rates;
-      const inTok = m.headroom_tokens_input_total;
-      const savedTok = m.headroom_tokens_saved_total;
-      const savingRatio =
-        Number.isFinite(inTok) && Number.isFinite(savedTok) && inTok + savedTok > 0
-          ? savedTok / (inTok + savedTok)
-          : null;
-      const cacheRatio =
-        Number.isFinite(m.headroom_requests_cached_total) && m.headroom_requests_total > 0
-          ? m.headroom_requests_cached_total / m.headroom_requests_total
-          : null;
-      const avgLatency =
-        Number.isFinite(m.headroom_latency_ms_sum) && m.headroom_latency_ms_count > 0
-          ? m.headroom_latency_ms_sum / m.headroom_latency_ms_count
-          : null;
-      const latencyText = avgLatency === null ? "-" : `${Math.round(avgLatency)}ms`;
-
-      const cells = [
-        `${dim("req/s")} ${bold(num(r.headroom_requests_total, 2))}`,
-        `${dim("attive")} ${bold(num(m.headroom_inbound_requests_active))}`,
-        `${dim("tok in/s")} ${bold(num(r.headroom_tokens_input_total, 1))}`,
-        `${dim("tok out/s")} ${bold(num(r.headroom_tokens_output_total, 1))}`,
-        `${dim("risparmio")} ${green(bold(pct(savingRatio)))}`,
-        `${dim("cache")} ${bold(pct(cacheRatio))}`,
-        `${dim("latenza")} ${bold(latencyText)}`,
-      ];
-      lines.push("  " + cells.join(dim("  .  ")));
-    } else {
-      lines.push("  " + dim("metriche non disponibili (headroom non raggiungibile)"));
-    }
+    lines.push(...this.pipelineLines(width));
     lines.push("");
 
     lines.push(bold("STREAM RICHIESTE") + dim("  " + this.eventsFile));
@@ -312,7 +443,6 @@ export class Dashboard {
       lines.push("  " + savingsCells.join(dim("  .  ")));
     }
 
-    const footerLines = 3;
     const slots = Math.max(1, height - lines.length - footerLines);
 
     if (this.events.length === 0) {
@@ -344,22 +474,15 @@ export class Dashboard {
       }
     }
 
-    if (lines.length > height - footerLines) lines.length = height - footerLines;
     while (lines.length < height - footerLines) lines.push("");
+    // Keep controls reachable even when expanded details exceed the terminal.
+    if (lines.length > height - footerLines) {
+      lines.length = height - footerLines;
+      lines[lines.length - 1] = dim("  ... aumenta l'altezza o premi d per ridurre i dettagli");
+    }
     lines.push(gray("-".repeat(width)));
 
-    const svc = this.currentService();
-    const target = svc ? bold(svc.id) : dim("-");
-    const keys = [
-      `${dim("up/down")} seleziona (${target})`,
-      `${dim("s")} start`,
-      `${dim("x")} stop`,
-      `${dim("r")} restart`,
-      `${dim("k")} kill`,
-      ...(svc?.dashboardUrl ? [`${dim("o")} dashboard`] : []),
-      `${dim("q")} esci`,
-    ];
-    lines.push(keys.join("  "));
+    lines.push(...keyLines);
     lines.push(this.busy ? yellow(this.status) : this.status || dim("pronto"));
 
     return lines.slice(0, height).map(line => clip(line, width));
@@ -410,6 +533,10 @@ export class Dashboard {
     }
 
     switch (key) {
+      case "d":
+        this.showPipelineDetails = !this.showPipelineDetails;
+        this.render();
+        return;
       case KEY_UP:
         this.selected = Math.max(0, this.selected - 1);
         this.render();

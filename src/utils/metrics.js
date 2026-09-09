@@ -284,22 +284,29 @@ export async function probeChain(statuses) {
     { id: "client", label: "client", state: "static", detail: "AI agents / CLI" },
     { id: "headroom", label: "headroom", state: stateOf("headroom"), detail: baseUrl(byId.headroom?.url) },
     { id: "pxpipe", label: "pxpipe", state: stateOf("pxpipe"), detail: baseUrl(byId.pxpipe?.url) },
-    { id: "upstream", label: "upstream", state: "static", detail: "" },
+    { id: "upstream", label: "upstream", state: "unknown", detail: "" },
   ];
 
   const headroomBase = baseUrl(byId.headroom?.url);
-  const health = headroomBase ? await fetchJson(`${headroomBase}/health`, 2000) : null;
+  const health = headroomBase && nodes[1].state === "running"
+    ? await fetchJson(`${headroomBase}/health`, 2000)
+    : null;
+
+  const checkedState = (status, fallback) => status === "healthy"
+    ? "healthy"
+    : status === "unhealthy" || status === "error" || status === "degraded" ? "error" : fallback;
 
   if (health) {
     if (health.version) nodes[1].detail = `${nodes[1].detail} v${health.version}`.trim();
-    if (health.status && health.status !== "healthy") nodes[1].state = "error";
+    nodes[1].state = checkedState(health.status, nodes[1].state);
 
     const upstream = health.checks?.upstream;
     if (upstream?.url) {
-      // headroom reports where it actually forwards to, which is pxpipe.
-      nodes[2].detail = upstream.url;
-      if (upstream.status && upstream.status !== "healthy" && nodes[2].state === "running") {
-        nodes[2].state = "error";
+      // A configured forwarder is not necessarily the managed pxpipe instance.
+      if (baseUrl(upstream.url) && baseUrl(upstream.url) === baseUrl(byId.pxpipe?.url)) {
+        if (nodes[2].state === "running") nodes[2].state = checkedState(upstream.status, nodes[2].state);
+      } else {
+        nodes[1].detail += ` | inoltro: ${upstream.url} (destinazione non verificata)`;
       }
     }
   }

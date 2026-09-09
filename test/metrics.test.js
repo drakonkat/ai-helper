@@ -11,6 +11,7 @@ import {
   readSavingsBreakdown,
 } from "../src/utils/metrics.js";
 import { Dashboard, splitKeys } from "../src/tui.js";
+import { stripAnsi } from "../src/utils/format.js";
 import { resolveAgentmemoryViewerPort } from "../src/utils/process.js";
 
 const SAMPLE = [
@@ -108,6 +109,30 @@ describe("tailJsonl", () => {
 });
 
 describe("probeChain", () => {
+  const probeWithHealth = async (payload, headroomStatus = "running", pxpipeStatus = "running") => {
+    let requests = 0;
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        requests++;
+        expect(new URL(request.url).pathname).toBe("/health");
+        return payload === null
+          ? new Response("Unavailable", { status: 503 })
+          : Response.json(payload);
+      },
+    });
+    try {
+      const result = await probeChain([
+        { id: "headroom", status: headroomStatus, url: `${server.url}dashboard` },
+        { id: "pxpipe", status: pxpipeStatus, url: "http://127.0.0.1:47821" },
+      ]);
+      return { ...result, requests };
+    } finally {
+      server.stop(true);
+    }
+  };
+
   it("builds the static chain when headroom does not answer", async () => {
     const { nodes, health } = await probeChain([
       { id: "headroom", status: "stopped", url: "http://127.0.0.1:9/dashboard" },
@@ -116,7 +141,69 @@ describe("probeChain", () => {
     expect(nodes.map(n => n.id)).toEqual(["client", "headroom", "pxpipe", "upstream"]);
     expect(nodes[1].state).toBe("stopped");
     expect(nodes[2].state).toBe("running");
+    expect(nodes[3].state).toBe("unknown");
     expect(health).toBeNull();
+  });
+
+  it("does not probe stopped headroom even when its old address answers", async () => {
+    const { nodes, health, requests } = await probeWithHealth({ status: "healthy" }, "stopped");
+    expect(requests).toBe(0);
+    expect(nodes[1].state).toBe("stopped");
+    expect(health).toBeNull();
+  });
+
+  it("keeps process-only states when health is unavailable", async () => {
+    const { nodes, health } = await probeWithHealth(null);
+    expect(nodes[1].state).toBe("running");
+    expect(nodes[2].state).toBe("running");
+    expect(health).toBeNull();
+  });
+
+  it.each([
+    ["healthy", "healthy"],
+    ["unhealthy", "error"],
+    ["degraded", "error"],
+    ["error", "error"],
+    ["unknown", "running"],
+    [undefined, "running"],
+  ])("maps explicit health status %s to %s for matching services", async (status, expected) => {
+    const { nodes } = await probeWithHealth({
+      status,
+      version: "0.37.0",
+      checks: { upstream: { url: "http://127.0.0.1:47821/v1", status } },
+    });
+    expect(nodes[0].state).toBe("static");
+    expect(nodes[1].state).toBe(expected);
+    expect(nodes[1].detail).toContain("v0.37.0");
+    expect(nodes[2].state).toBe(expected);
+    expect(nodes[2].detail).toBe("http://127.0.0.1:47821");
+    expect(nodes[3].state).toBe("unknown");
+  });
+
+  it.each(["healthy", "unhealthy"])("does not attribute another forwarder's %s status to managed pxpipe", async status => {
+    const { nodes } = await probeWithHealth({
+      status: "healthy",
+      checks: { upstream: { url: "http://127.0.0.1:9999/v1", status } },
+    });
+    expect(nodes[1].detail).toContain("inoltro: http://127.0.0.1:9999/v1 (destinazione non verificata)");
+    expect(nodes[2].state).toBe("running");
+    expect(nodes[2].detail).toBe("http://127.0.0.1:47821");
+  });
+
+  it("requires a reported URL before attributing health to pxpipe", async () => {
+    const { nodes } = await probeWithHealth({
+      status: "healthy",
+      checks: { upstream: { status: "unhealthy" } },
+    });
+    expect(nodes[2].state).toBe("running");
+  });
+
+  it("never promotes a stopped pxpipe from another service's health report", async () => {
+    const { nodes } = await probeWithHealth({
+      status: "healthy",
+      checks: { upstream: { url: "http://127.0.0.1:47821", status: "healthy" } },
+    }, "running", "stopped");
+    expect(nodes[2].state).toBe("stopped");
   });
 });
 
@@ -148,6 +235,8 @@ describe("proxy visibility", () => {
     dashboard.onKey("o");
     expect(opened).toBe(false);
     const screen = dashboard.buildLines().join("\n");
+    expect(screen).toContain("VERSION");
+    expect(screen).toContain("UPDATE");
     expect(screen).toContain("risparmio stimato 120");
     expect(screen).toContain("rtk: 20");
     expect(screen).toContain("pxpipe: 100");
@@ -156,6 +245,14 @@ describe("proxy visibility", () => {
     const chain = await probeChain(dashboard.statuses);
     expect(chain.nodes.map(n => n.id)).toEqual(["client", "proxy", "rtk", "pxpipe", "upstream"]);
     expect(chain.nodes[3].label).toBe("pxpipe (libreria)");
+    dashboard.chain = chain.nodes;
+    dashboard.chainAt = Date.now();
+    const pipeline = () => dashboard.pipelineLines(100).map(stripAnsi).join("\n");
+    expect(pipeline()).toContain("aih proxy: processo attivo");
+    expect(pipeline()).toContain("pxpipe (libreria): processo attivo");
+    dashboard.onKey("d");
+    expect(pipeline()).toContain("aih proxy: http://127.0.0.1:10102");
+    expect(pipeline()).toContain("upstream: http://127.0.0.1:10100");
   });
 });
 

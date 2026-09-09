@@ -134,6 +134,24 @@ agentmemory   ● RUNNING   44600   1h 32m   http://localhost:3113    npx @agent
 Use 'aih open [service]' to open dashboards in browser or 'aih start' to launch.
 ```
 
+Run `aih status --ui` in a terminal for the interactive live dashboard. Its
+`VERSION` column shows the running service version when available, otherwise the
+installed version. `UPDATE` shows `↑ <version>` for an available update,
+`aggiornato` when no newer version is found, or `n/d` when the check cannot be
+completed. Checks query npm/PyPI in the background every five minutes and after
+a service restart; they never install or update services.
+
+The `PIPELINE` panel separates current activity from Headroom's cumulative
+statistics (since its counters started). `Token risparmiati` is saved tokens /
+(input + saved); `Richieste cached` is cached requests / total requests, not a
+cost-saving percentage. `Durata media` is the cumulative mean request latency.
+Press **`d`** to toggle URLs, versions, token rates and metric definitions.
+Rates use the interval between samples, not streaming token-generation speed.
+Only explicit health checks show a service as `verificato`; a running process
+alone is not a health check, and the final upstream is not monitored.
+After a failed collection or five seconds without a sample, totals are marked
+as old and live activity/rates are hidden until collection recovers.
+
 ---
 
 ### 2. Open Dashboards in Browser

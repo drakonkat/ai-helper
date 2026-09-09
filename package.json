@@ -35,7 +35,7 @@
   "scripts": {
     "start": "node ./bin/cli.js",
     "dev": "node ./bin/cli.js",
-    "test": "bun test test/aih.test.js test/metrics.test.js && node --test test/proxy.test.js",
+    "test": "bun test test/aih.test.js test/metrics.test.js test/discovery.test.js test/tui-pipeline.test.js test/tui-versions.test.js test/versions.test.js && node --test test/proxy.test.js",
     "build": "bun run scripts/build.js",
     "install-bin": "bun run scripts/install-bin.js"
   },
