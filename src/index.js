@@ -1,5 +1,7 @@
 import { APP_NAME, CLI_NAME, SERVICES, SERVICE_IDS, VERSION } from "./config.js";
 import { manager } from "./manager.js";
+import { checkForUpdates } from "./update.js";
+import { readProxyStats, proxyStatsLines } from "./proxy-stats.js";
 import {
   badgeStatus,
   bold,
@@ -16,6 +18,7 @@ import {
 import { isLocalBinInPath, getAddToPathInstructions, getLocalBinDir, ensureDir } from "./utils/path.js";
 import { join } from "node:path";
 import { copyFileSync } from "node:fs";
+import { parseArgs } from "node:util";
 
 function printHelp() {
   printBanner();
@@ -27,9 +30,11 @@ ${bold("COMMANDS:")}
   ${yellow("status -ui")}              Interactive live dashboard: manage services and watch the AI pipeline
   ${yellow("open")}, ${yellow("dash")} [services...]  Open web dashboard(s) directly in your default browser
   ${yellow("start")}, ${yellow("up")} [services...]   Start all or specified services (pxpipe, ocx, agentmemory, headroom)
+  ${yellow("start proxy")} <upstream>     Start HTTP/SSE/WebSocket proxy (default: 127.0.0.1:10101)
   ${yellow("stop")}, ${yellow("down")} [services...]   Stop all or specified services
   ${yellow("restart")} [services...]      Restart all or specified services
   ${yellow("logs")} <service> [-n 50] [-f]  View or stream live logs for a service
+  ${yellow("stats proxy")} [--json]       Show proxy token savings estimates and recent requests
   ${yellow("install")}                  Build standalone binary to ~/.local/bin and verify PATH
   ${yellow("version")}, ${yellow("-v")}            Show version information
   ${yellow("help")}, ${yellow("-h")}               Show this help message
@@ -44,6 +49,13 @@ ${bold("OPTIONS:")}
   ${gray("-n, --lines <num>")}     Number of log lines to show (default: 50)
   ${gray("-f, --follow")}          Follow log output in real-time
   ${gray("--json")}                Output results in JSON format
+  ${gray("--listen <http://host:port>")}  Proxy loopback listening address
+  ${gray("--interceptor <file.mjs>")}     Proxy JavaScript hooks (loaded at startup)
+  ${gray("--preset <name>")}              pxpipe | headroom | rtk | headroom-pxpipe | rtk-pxpipe | none
+  ${gray("--models <list>")}              pxpipe model allowlist, comma-separated (trailing * supported)
+  ${gray("--headroom-url <url>")}         Headroom service (default: http://127.0.0.1:8787)
+  ${gray("--rtk-filter <name>")}          Fixed rtk pipe filter (default: auto-detect)
+  ${gray("--max-body-bytes <num>")}       Proxy buffered request / WebSocket limit (default: 67108864)
   ${gray("-ui, --ui")}             Open the interactive dashboard (status only, requires a TTY)
 
 ${bold("EXAMPLES:")}
@@ -81,14 +93,7 @@ async function runInstall() {
 
   try {
     const buildProc = Bun.spawn(
-      [
-        process.execPath,
-        "build",
-        "--compile",
-        "--minify",
-        `--outfile=${tempBuildPath}`,
-        join(import.meta.dir, "index.js"),
-      ],
+      [process.execPath, join(import.meta.dir, "../scripts/build.js"), tempBuildPath],
       { stdout: "pipe", stderr: "pipe" }
     );
 
@@ -134,6 +139,33 @@ async function runInstall() {
 export async function main() {
   const rawArgs = process.argv.slice(2);
 
+  if (["start", "up", "restart"].includes(rawArgs[0]) && rawArgs[1] === "proxy" && !rawArgs.includes("--help") && !rawArgs.includes("-h")) {
+    const { values, positionals } = parseArgs({ args: rawArgs.slice(2), allowPositionals: true, options: {
+      listen: { type: "string" }, interceptor: { type: "string" },
+      preset: { type: "string" }, models: { type: "string" },
+      "headroom-url": { type: "string" }, "rtk-filter": { type: "string" },
+      "max-body-bytes": { type: "string" }, json: { type: "boolean" },
+    } });
+    if (positionals.length > 1) throw new Error("Expected one upstream URL");
+    const options = {};
+    if (positionals[0]) options.upstream = positionals[0];
+    if (values.listen !== undefined) options.listen = values.listen;
+    if (values.interceptor !== undefined) options.interceptor = values.interceptor;
+    for (const [flag, key] of Object.entries({ preset: "preset", models: "models", "headroom-url": "headroomUrl", "rtk-filter": "rtkFilter" })) {
+      if (values[flag] !== undefined) options[key] = values[flag];
+    }
+    if (values["max-body-bytes"] !== undefined) options.maxBodyBytes = values["max-body-bytes"];
+    if (rawArgs[0] !== "restart") await checkForUpdates();
+    const result = rawArgs[0] === "restart"
+      ? await manager.restartService("proxy", options)
+      : await manager.startService("proxy", options);
+    if (values.json) console.log(JSON.stringify(result));
+    else if (result.success) console.log(green(`Proxy ${result.alreadyRunning ? "already running" : "started"} (PID: ${result.pid}) at ${result.url}`));
+    else console.error(red(result.message));
+    if (!result.success) process.exitCode = 1;
+    return;
+  }
+
   let jsonOutput = false;
   let follow = false;
   let uiMode = false;
@@ -173,6 +205,20 @@ export async function main() {
   const targets = positionalArgs.slice(1);
 
   switch (command) {
+    case "stats": {
+      if (targets.length > 1 || (targets[0] && targets[0] !== "proxy")) throw new Error("Usage: aih stats proxy [--json]");
+      const stats = readProxyStats();
+      if (jsonOutput) console.log(JSON.stringify(stats, null, 2));
+      else {
+        console.log(proxyStatsLines(stats).join("\n"));
+        if (stats) console.log(`  Dal ${stats.since} | aggiornato ${stats.updatedAt}`);
+        for (const event of stats?.recent.slice(-5) || []) {
+          console.log(`  ${event.at} ${event.transport} ${event.model} ${event.preset}: ${event.error ? "errore" : `${event.saved} token stimati`}`);
+          for (const stage of event.stages) console.log(`    ${stage.name}: ${stage.saved ?? "?"} (${stage.reason}, ${stage.method})`);
+        }
+      }
+      break;
+    }
     case "status":
     case "ps":
     case "ls":
@@ -199,7 +245,7 @@ export async function main() {
         "STATUS",
         { header: "PID", align: "right" },
         { header: "UPTIME", align: "right" },
-        "DASHBOARD / URL",
+        "ADDRESS",
         "COMMAND",
       ];
 
@@ -208,7 +254,7 @@ export async function main() {
         badgeStatus(s.status),
         s.pid ? String(s.pid) : dim("-"),
         s.status === "running" ? s.uptime : dim("-"),
-        s.status === "running" && s.url && s.url !== "-"
+        s.id === "proxy" ? dim(`${s.url} (proxy)`) : s.status === "running" && s.url && s.url !== "-"
           ? cyan(underline(s.url))
           : dim(s.url || "-"),
         dim(s.command),
@@ -243,8 +289,9 @@ export async function main() {
 
     case "start":
     case "up": {
+      await checkForUpdates();
       printBanner();
-      const svcsToStart = targets.length > 0 ? targets : SERVICE_IDS;
+      const svcsToStart = targets.length > 0 ? targets : Object.keys(manager.readState().services);
       console.log(cyan(`Starting service(s): ${svcsToStart.join(", ")}...\n`));
 
       for (const id of svcsToStart) {
@@ -267,7 +314,7 @@ export async function main() {
     case "stop":
     case "down": {
       printBanner();
-      const svcsToStop = targets.length > 0 ? targets : SERVICE_IDS;
+      const svcsToStop = targets.length > 0 ? targets : Object.keys(manager.readState().services);
       console.log(cyan(`Stopping service(s): ${svcsToStop.join(", ")}...\n`));
 
       for (const id of svcsToStop) {
@@ -285,7 +332,7 @@ export async function main() {
 
     case "restart": {
       printBanner();
-      const svcsToRestart = targets.length > 0 ? targets : SERVICE_IDS;
+      const svcsToRestart = targets.length > 0 ? targets : Object.keys(manager.readState().services);
       console.log(cyan(`Restarting service(s): ${svcsToRestart.join(", ")}...\n`));
 
       for (const id of svcsToRestart) {
@@ -311,7 +358,7 @@ export async function main() {
         process.exit(1);
       }
 
-      if (!SERVICE_IDS.includes(targetService)) {
+      if (!SERVICE_IDS.includes(targetService) && targetService !== "proxy") {
         console.log(yellow(`⚠ Warning: '${targetService}' is not a standard service. Looking for log file anyway...`));
       }
 

@@ -1,9 +1,9 @@
 node_modules/
 dist/
+*.bun-build
 *.log
 .aih/
 .env
 .DS_Store
 Thumbs.db
 .idea/
-

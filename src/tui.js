@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { SERVICES, APP_NAME, VERSION } from "./config.js";
+import { APP_NAME, VERSION } from "./config.js";
 import { manager } from "./manager.js";
 import {
   badgeStatus,
@@ -17,7 +17,8 @@ import {
   white,
   yellow,
 } from "./utils/format.js";
-import { killProcessTree, openBrowser } from "./utils/process.js";
+import { killProcessTree } from "./utils/process.js";
+import { readProxyStats, proxyStatsLines } from "./proxy-stats.js";
 import {
   baseUrl,
   diffRates,
@@ -138,6 +139,7 @@ export class Dashboard {
     this.eventsFile = getEventsFilePath();
     this.eventsFileSeen = false;
     this.savings = null;
+    this.proxyStats = null;
     this.selected = 0;
     this.status = "";
     this.busy = false;
@@ -193,6 +195,7 @@ export class Dashboard {
       }
 
       this.savings = readSavingsBreakdown();
+      this.proxyStats = readProxyStats();
     } catch (err) {
       this.status = red(`Refresh error: ${err?.message || err}`);
     } finally {
@@ -231,7 +234,7 @@ export class Dashboard {
         badgeStatus(s.status),
         s.pid ? String(s.pid) : dim("-"),
         s.status === "running" ? s.uptime : dim("-"),
-        s.status === "running" && s.url && s.url !== "-" ? cyan(underline(s.url)) : dim(s.url || "-"),
+        s.id === "proxy" ? dim(`${s.url} (proxy)`) : s.status === "running" && s.url && s.url !== "-" ? cyan(underline(s.url)) : dim(s.url || "-"),
       ];
     });
     if (rows.length > 0) {
@@ -241,6 +244,13 @@ export class Dashboard {
       lines.push(dim("  No services."));
     }
     lines.push("");
+
+    if (this.statuses.some(s => s.id === "proxy") || this.proxyStats) {
+      lines.push(...proxyStatsLines(this.proxyStats));
+      const last = this.proxyStats?.recent.at(-1);
+      if (last) lines.push(dim(`  Ultima: ${last.model} ${last.preset} | ${last.error ? "errore" : last.stages.map(s => `${s.name}: ${s.reason}`).join(" | ")}`));
+      lines.push("");
+    }
 
     lines.push(bold("PIPELINE"));
     lines.push("  " + this.chain.map(paintNode).join(gray(" --> ")));
@@ -334,6 +344,7 @@ export class Dashboard {
       }
     }
 
+    if (lines.length > height - footerLines) lines.length = height - footerLines;
     while (lines.length < height - footerLines) lines.push("");
     lines.push(gray("-".repeat(width)));
 
@@ -345,7 +356,7 @@ export class Dashboard {
       `${dim("x")} stop`,
       `${dim("r")} restart`,
       `${dim("k")} kill`,
-      `${dim("o")} dashboard`,
+      ...(svc?.dashboardUrl ? [`${dim("o")} dashboard`] : []),
       `${dim("q")} esci`,
     ];
     lines.push(keys.join("  "));
@@ -423,11 +434,10 @@ export class Dashboard {
         });
         return;
       case "o":
+        if (!this.currentService()?.dashboardUrl) return;
         this.runAction("Dashboard", async svc => {
-          const url = svc.url && svc.url !== "-" ? svc.url : SERVICES[svc.id]?.defaultUrl;
-          if (!url) return { success: false, message: `${svc.id}: nessuna URL disponibile` };
-          openBrowser(url);
-          return { success: true, message: `Aperto ${url}` };
+          const opened = await manager.openDashboard([svc.id]);
+          return { success: opened.length > 0, message: opened.length ? `Aperto ${opened[0].url}` : "Nessuna dashboard disponibile" };
         });
         return;
       default:

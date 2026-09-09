@@ -10,7 +10,7 @@ import {
   probeChain,
   readSavingsBreakdown,
 } from "../src/utils/metrics.js";
-import { splitKeys } from "../src/tui.js";
+import { Dashboard, splitKeys } from "../src/tui.js";
 import { resolveAgentmemoryViewerPort } from "../src/utils/process.js";
 
 const SAMPLE = [
@@ -133,6 +133,29 @@ describe("splitKeys", () => {
     expect(splitKeys("\x1b[A")).toEqual(["\x1b[A"]);
     expect(splitKeys("\x1b[Bs")).toEqual(["\x1b[B", "s"]);
     expect(splitKeys("qx")).toEqual(["q", "x"]);
+  });
+});
+
+describe("proxy visibility", () => {
+  it("shows preset savings and wiring without offering a proxy dashboard", async () => {
+    const dashboard = new Dashboard();
+    dashboard.statuses = [{ id: "proxy", status: "running", url: "http://127.0.0.1:10102", dashboardUrl: null,
+      proxyOptions: { preset: "rtk-pxpipe", upstream: "http://127.0.0.1:10100" } }];
+    dashboard.proxyStats = { requests: 2, changed: 1, errors: 0, estimatedSavedTokens: 120,
+      stages: { rtk: { saved: 20, applied: 1, requests: 2 }, pxpipe: { saved: 100, applied: 1, requests: 2 } }, recent: [] };
+    let opened = false;
+    dashboard.runAction = () => { opened = true; };
+    dashboard.onKey("o");
+    expect(opened).toBe(false);
+    const screen = dashboard.buildLines().join("\n");
+    expect(screen).toContain("risparmio stimato 120");
+    expect(screen).toContain("rtk: 20");
+    expect(screen).toContain("pxpipe: 100");
+    expect(screen).not.toContain("o\x1b[0m dashboard");
+    expect(screen).not.toContain("\x1b[4mhttp://127.0.0.1:10102");
+    const chain = await probeChain(dashboard.statuses);
+    expect(chain.nodes.map(n => n.id)).toEqual(["client", "proxy", "rtk", "pxpipe", "upstream"]);
+    expect(chain.nodes[3].label).toBe("pxpipe (libreria)");
   });
 });
 

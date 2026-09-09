@@ -1,5 +1,9 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
+// Node 18 uses assert; newer Node uses with. Bun embeds this JSON when compiling.
+const { default: packageInfo } = await import("../package.json", {
+  with: { type: "json" }, assert: { type: "json" },
+});
 
 /**
  * Pre-configured AI ecosystem services managed by aih
@@ -49,4 +53,5 @@ export const SERVICE_IDS = Object.keys(SERVICES);
 
 export const APP_NAME = "ai-helper";
 export const CLI_NAME = "aih";
-export const VERSION = "1.1.0";
+export const VERSION = packageInfo.version;
+export const PACKAGE_NAME = packageInfo.name;

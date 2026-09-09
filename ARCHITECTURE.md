@@ -91,10 +91,21 @@ Uses `ps -eo pid,command` to match command line strings and extract active PIDs.
 
 ---
 
-## 5. Zero-Dependency & Cross-Runtime Design
+## 5. Runtime Design
 
-`ai-helper` relies solely on standard built-in modules:
+The service manager uses standard built-in modules:
 - `node:child_process` & `node:fs`
-- Works out of the box on **Node.js (>= 18.0.0)** and **Bun (>= 1.0.0)**.
+- The CLI runs on **Node.js (>= 20.19.0)** and **Bun**.
 - Standalone binaries can be generated with `bun build --compile`.
 
+The interceptor proxy uses Node's HTTP/HTTPS streams and the `ws` package.
+Its worker always runs on Node, including when launched by Bun: Bun's compatibility
+layers do not preserve all required WebSocket handshake and HTTP cancellation
+behavior. `scripts/build.js` embeds a bundled Node worker in the compiled CLI;
+on startup it is written to `AIH_HOME/proxy-worker.mjs`. Build with `bun run build`
+to include this worker. Node must remain available on PATH.
+
+The manager spawns the worker directly, without a shell, and waits for an IPC
+ready/error message before saving its PID and configuration. Proxy stop targets
+that PID only; it does not kill other processes by listening port. Interceptors
+are loaded in the worker and use the same code path in source and compiled builds.

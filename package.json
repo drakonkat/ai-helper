@@ -12,13 +12,14 @@
   "files": [
     "bin",
     "src",
+    "scripts/build.js",
     "README.md",
     "LICENSE",
     "ARCHITECTURE.md",
     "CHANGELOG.md"
   ],
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.19.0"
   },
   "publishConfig": {
     "access": "public"
@@ -34,8 +35,8 @@
   "scripts": {
     "start": "node ./bin/cli.js",
     "dev": "node ./bin/cli.js",
-    "test": "bun test",
-    "build": "bun build --compile --minify --outfile dist/aih.exe src/index.js",
+    "test": "bun test test/aih.test.js test/metrics.test.js && node --test test/proxy.test.js",
+    "build": "bun run scripts/build.js",
     "install-bin": "bun run scripts/install-bin.js"
   },
   "keywords": [
@@ -53,5 +54,10 @@
     "developer-tools"
   ],
   "author": "Mauro",
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "gpt-tokenizer": "3.4.0",
+    "pxpipe-proxy": "0.13.2",
+    "ws": "^8.21.3"
+  }
 }

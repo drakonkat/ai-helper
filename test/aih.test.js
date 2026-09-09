@@ -1,10 +1,106 @@
-import { describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { join } from "node:path";
 import { SERVICES, SERVICE_IDS, APP_NAME, CLI_NAME } from "../src/config.js";
 import { formatBytes, formatUptime, stripAnsi, renderTable, badgeStatus } from "../src/utils/format.js";
 import { getAihDir, getStateFilePath, getLogsDir, getServiceLogPath, getLocalBinDir, isLocalBinInPath } from "../src/utils/path.js";
 import { isPidRunning, discoverRunningProcesses } from "../src/utils/process.js";
-import { ServiceManager } from "../src/manager.js";
+import { manager, ServiceManager } from "../src/manager.js";
+import { PACKAGE_NAME, VERSION } from "../src/config.js";
+import { checkForUpdates, isNewerVersion } from "../src/update.js";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+
+const originalAihHome = process.env.AIH_HOME;
+let testHome;
+beforeAll(() => {
+  testHome = mkdtempSync(join(tmpdir(), "aih-tests-"));
+  process.env.AIH_HOME = join(testHome, ".aih");
+});
+afterAll(() => {
+  if (originalAihHome === undefined) delete process.env.AIH_HOME;
+  else process.env.AIH_HOME = originalAihHome;
+  rmSync(testHome, { recursive: true, force: true });
+});
+
+describe("Update check", () => {
+  it("checks start and up once, notifies on stderr, and starts services offline", async () => {
+    const original = { argv: process.argv, fetch: globalThis.fetch, log: console.log, error: console.error, start: manager.startService };
+    const notifications = [];
+    let checks = 0;
+    let starts = 0;
+    try {
+      console.log = () => {};
+      console.error = message => notifications.push(message);
+      globalThis.fetch = async () => { checks++; return { ok: true, json: async () => ({ version: "999.0.0" }) }; };
+      manager.startService = async () => { starts++; return { success: true, pid: 123 }; };
+      process.argv = ["node", "aih", "--help"];
+      const { main } = await import("../src/index.js");
+      for (const args of [
+        ["start", "test-service"], ["--json", "up", "test-service"],
+        ["start", "proxy", "http://127.0.0.1:10100", "--json"],
+        ["up", "proxy", "http://127.0.0.1:10100", "--json"], ["version"],
+      ]) {
+        process.argv = ["node", "aih", ...args];
+        await main();
+      }
+      expect(checks).toBe(4);
+      expect(starts).toBe(4);
+      expect(notifications.length).toBe(4);
+      globalThis.fetch = async () => { throw new Error("offline"); };
+      process.argv = ["node", "aih", "start", "test-service"];
+      await main();
+      expect(starts).toBe(5);
+      expect(notifications.length).toBe(4);
+    } finally {
+      process.argv = original.argv;
+      globalThis.fetch = original.fetch;
+      console.log = original.log;
+      console.error = original.error;
+      manager.startService = original.start;
+    }
+  });
+
+  it("compares release versions and treats registry errors as non-fatal", async () => {
+    const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+    expect(VERSION).toBe(pkg.version);
+    expect(PACKAGE_NAME).toBe(pkg.name);
+    for (const [latest, current, newer] of [
+      ["1.10.0", "1.9.9", true], ["2.0.0", "1.99.99", true],
+      ["1.1.1", "1.1.1", false], ["1.0.9", "1.1.0", false],
+      ["1.0.0", "1.0.0-rc.1", true], ["1.0.0-rc.1", "1.0.0", false],
+      ["1.0.0-rc.10", "1.0.0-rc.2", true], ["1.0.0-beta", "1.0.0-alpha", true],
+      ["1.0.0-rc.1", "1.0.0-rc", true], ["1.0.0-rc", "1.0.0-rc.1", false],
+      ["1.0.0-alpha", "1.0.0-1", true], ["1.0.0-1", "1.0.0-alpha", false],
+      ["1.0.0+new", "1.0.0+old", false], ["invalid", "1.0.0", false],
+      ["1.0.0\nmalicious", "1.0.0", false], [undefined, "1.0.0", false],
+      ["999.0.0\n", "1.0.0", false],
+    ]) expect(isNewerVersion(latest, current)).toBe(newer);
+    const messages = [];
+    const notify = message => messages.push(message);
+    await checkForUpdates({ notify, fetchImpl: async (url, options) => {
+      expect(url).toBe(`https://registry.npmjs.org/${encodeURIComponent(PACKAGE_NAME)}/latest`);
+      expect(options.signal).toBeInstanceOf(AbortSignal);
+      return { ok: true, json: async () => ({ version: "999.0.0" }) };
+    } });
+    expect(messages.length).toBe(1);
+    expect(messages[0]).toContain(`${VERSION} -> 999.0.0`);
+    expect(messages[0]).toContain(`npm install -g ${PACKAGE_NAME}@latest`);
+    for (const result of [
+      { ok: false }, { ok: true, json: async () => ({ version: VERSION }) },
+      { ok: true, json: async () => ({ version: "invalid" }) },
+      { ok: true, json: async () => { throw new Error("bad JSON"); } },
+    ]) await checkForUpdates({ notify, fetchImpl: async () => result });
+    await checkForUpdates({ notify, fetchImpl: async () => { throw new Error("offline"); } });
+    // A real fetch keeps the event loop alive; this mock has no network socket.
+    const keepAlive = setInterval(() => {}, 100);
+    try {
+      await checkForUpdates({ notify, fetchImpl: (_url, { signal }) => new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      }) });
+    } finally { clearInterval(keepAlive); }
+    expect(messages.length).toBe(1);
+  });
+});
 
 describe("Configuration", () => {
   it("should have correct app and CLI names", () => {

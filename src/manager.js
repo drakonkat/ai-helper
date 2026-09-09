@@ -1,4 +1,8 @@
 import { existsSync, readFileSync, writeFileSync, statSync, openSync, readSync, closeSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { normalizeProxyOptions } from "./proxy.js";
 import { SERVICES, SERVICE_IDS } from "./config.js";
 import { ensureDir, getAihDir, getLogsDir, getServiceLogPath, getStateFilePath } from "./utils/path.js";
 import {
@@ -60,7 +64,7 @@ export class ServiceManager {
     // Discover active verified daemon processes from OS
     const discovered = await discoverRunningProcesses();
 
-    for (const id of SERVICE_IDS) {
+    for (const id of Object.keys(state.services)) {
       const svc = state.services[id];
       const info = discovered[id];
 
@@ -140,7 +144,7 @@ export class ServiceManager {
    */
   async getStatus(targetServices) {
     const state = await this.syncState();
-    const targets = targetServices && targetServices.length > 0 ? targetServices : SERVICE_IDS;
+    const targets = targetServices && targetServices.length > 0 ? targetServices : Object.keys(state.services);
 
     return targets.map(id => {
       const def = SERVICES[id] || {
@@ -173,6 +177,7 @@ export class ServiceManager {
         description: def.description,
         uptime: svcState.status === "running" ? formatUptime(svcState.startedAt) : "-",
         url,
+        dashboardUrl: id === "proxy" || url === "-" ? null : url,
         logPath,
         logSize,
       };
@@ -187,7 +192,7 @@ export class ServiceManager {
     const opened = [];
 
     for (const svc of statuses) {
-      const url = svc.url || SERVICES[svc.id]?.defaultUrl;
+      const url = svc.dashboardUrl;
       if (url && url !== "-") {
         openBrowser(url);
         opened.push({ id: svc.id, name: svc.name, url, status: svc.status });
@@ -200,7 +205,8 @@ export class ServiceManager {
   /**
    * Starts a single service by ID.
    */
-  async startService(serviceId) {
+  async startService(serviceId, options) {
+    if (serviceId === "proxy") return this.startProxyService(options);
     const def = SERVICES[serviceId];
     if (!def) {
       return { success: false, message: `Unknown service '${serviceId}'. Available: ${SERVICE_IDS.join(", ")}` };
@@ -259,11 +265,82 @@ export class ServiceManager {
     };
   }
 
+  async startProxyService(options) {
+    const state = this.loadState();
+    const current = state.services.proxy;
+    const config = normalizeProxyOptions({ ...current?.proxyOptions, ...options });
+    if (current?.status === "running" && isPidRunning(current.pid)) {
+      if (JSON.stringify(config) !== JSON.stringify(current.proxyOptions)) {
+        throw new Error("Proxy is already running with different options; use 'aih restart proxy <upstream> [options]'");
+      }
+      return { success: true, alreadyRunning: true, pid: current.pid, url: current.url };
+    }
+    ensureDir(getLogsDir());
+    const compiled = typeof Bun !== "undefined" && /^(?:\/\$bunfs\/|[A-Z]:\/~BUN\/)/i.test(Bun.main);
+    let workerPath = fileURLToPath(new URL("./proxy-worker.js", import.meta.url));
+    if (compiled) {
+      if (typeof AIH_PROXY_WORKER_SOURCE === "undefined") throw new Error("Rebuild with 'bun run build' to include the proxy worker");
+      workerPath = join(getAihDir(), "proxy-worker.mjs");
+      writeFileSync(workerPath, AIH_PROXY_WORKER_SOURCE);
+    }
+    let nodeExecutable = process.execPath;
+    if (typeof Bun !== "undefined") {
+      // NVM shims can drop IPC handles and expose the launcher's PID. Spawn Node itself.
+      try {
+        nodeExecutable = execFileSync("node", ["-p", "process.execPath"], {
+          encoding: "utf8", windowsHide: true, timeout: 5000,
+        }).trim();
+      } catch (error) {
+        throw new Error(`Cannot resolve Node.js 20.19+ on PATH: ${error.message}`);
+      }
+    }
+    const fd = openSync(getServiceLogPath("proxy"), "a");
+    let child;
+    try {
+      // Bun's HTTP/ws shims omit handshake events and cancellation; always use Node.
+      child = spawn(nodeExecutable, [workerPath], {
+        detached: true, windowsHide: true, stdio: ["ignore", fd, fd, "ipc"],
+        env: { ...process.env, AIH_PROXY_OPTIONS: JSON.stringify(config) },
+      });
+    } finally { closeSync(fd); }
+    try {
+      const ready = await new Promise((resolveReady, reject) => {
+        const timeout = setTimeout(() => finish(new Error("Proxy startup timed out; check 'aih logs proxy'")), 15000);
+        const onError = error => finish(error.code === "ENOENT" ? new Error("Proxy requires Node.js 20.19+ on PATH") : error);
+        const onExit = code => finish(new Error(`Proxy exited during startup (${code}); check 'aih logs proxy'`));
+        const onMessage = message => {
+          if (message.error) finish(new Error(message.error));
+          else if (message.url) finish(null, message);
+        };
+        const finish = (error, result) => {
+          clearTimeout(timeout);
+          child.off("error", onError).off("exit", onExit).off("message", onMessage);
+          error ? reject(error) : resolveReady(result);
+        };
+        child.once("error", onError).once("exit", onExit).on("message", onMessage);
+      });
+      const updated = this.loadState();
+      updated.services.proxy = {
+        id: "proxy", name: "proxy", command: `aih start proxy ${config.upstream}`,
+        status: "running", pid: child.pid, startedAt: new Date().toISOString(),
+        url: ready.url, proxyOptions: config,
+      };
+      this.saveState(updated);
+      return { success: true, pid: child.pid, url: ready.url };
+    } catch (error) {
+      if (child.pid) await killProcessTree(child.pid);
+      throw error;
+    } finally {
+      if (child.connected) child.disconnect();
+      child.unref();
+    }
+  }
+
   /**
    * Starts all or selected services.
    */
   async startServices(serviceIds) {
-    const targets = serviceIds && serviceIds.length > 0 ? serviceIds : SERVICE_IDS;
+    const targets = serviceIds && serviceIds.length > 0 ? serviceIds : Object.keys(this.readState().services);
     const results = {};
 
     for (const id of targets) {
@@ -281,6 +358,8 @@ export class ServiceManager {
     const state = await this.syncState();
     const current = state.services[serviceId];
 
+    if (!current) return { success: false, message: `Unknown service '${serviceId}'` };
+
     // 1. If service has a dedicated graceful stopCommand, run it
     if (def?.stopCommand) {
       const isWin = process.platform === "win32";
@@ -294,7 +373,8 @@ export class ServiceManager {
 
     // 2. Kill recorded process tree if still active
     if (current && current.pid && isPidRunning(current.pid)) {
-      await killProcessTree(current.pid);
+      const result = await killProcessTree(current.pid);
+      if (!result.success) return result;
     }
 
     // 3. Clean up any remaining processes holding the service's ports
@@ -323,7 +403,7 @@ export class ServiceManager {
    * Stops all or selected services.
    */
   async stopServices(serviceIds) {
-    const targets = serviceIds && serviceIds.length > 0 ? serviceIds : SERVICE_IDS;
+    const targets = serviceIds && serviceIds.length > 0 ? serviceIds : Object.keys(this.readState().services);
     const results = {};
 
     for (const id of targets) {
@@ -336,17 +416,23 @@ export class ServiceManager {
   /**
    * Restarts a single service by ID.
    */
-  async restartService(serviceId) {
-    await this.stopService(serviceId);
+  async restartService(serviceId, options) {
+    if (serviceId === "proxy") {
+      const current = this.readState().services.proxy;
+      normalizeProxyOptions({ ...current?.proxyOptions, ...options });
+      if (!current) return this.startService(serviceId, options);
+    }
+    const stopped = await this.stopService(serviceId);
+    if (!stopped.success) return stopped;
     await sleep(600);
-    return await this.startService(serviceId);
+    return await this.startService(serviceId, options);
   }
 
   /**
    * Restarts all or selected services.
    */
   async restartServices(serviceIds) {
-    const targets = serviceIds && serviceIds.length > 0 ? serviceIds : SERVICE_IDS;
+    const targets = serviceIds && serviceIds.length > 0 ? serviceIds : Object.keys(this.readState().services);
     const results = {};
 
     for (const id of targets) {

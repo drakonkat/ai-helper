@@ -263,6 +263,21 @@ export async function probeChain(statuses) {
   const byId = {};
   for (const svc of statuses || []) byId[svc.id] = svc;
 
+  const proxy = byId.proxy;
+  if (proxy?.proxyOptions) {
+    const preset = proxy.proxyOptions.preset || "none";
+    const stages = preset === "none" ? [] : preset.split("-").map(id => ({
+      id, label: id === "pxpipe" ? "pxpipe (libreria)" : id === "rtk" ? "rtk (pipe)" : "headroom (compress)",
+      state: id === "pxpipe" ? proxy.status : "static", detail: id === "headroom" ? proxy.proxyOptions.headroomUrl : "",
+    }));
+    return { nodes: [
+      { id: "client", label: "client", state: "static", detail: "AI agents / CLI" },
+      { id: "proxy", label: "aih proxy", state: proxy.status, detail: proxy.url },
+      ...stages,
+      { id: "upstream", label: "upstream", state: "static", detail: proxy.proxyOptions.upstream },
+    ], health: null };
+  }
+
   const stateOf = id => byId[id]?.status || "unknown";
 
   const nodes = [

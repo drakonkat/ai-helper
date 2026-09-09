@@ -22,16 +22,8 @@ async function run() {
 
   // 1. Build standalone executable using Bun
   console.log(cyan("Step 1: Compiling standalone binary with Bun..."));
-  const entryPoint = join(process.cwd(), "src", "index.js");
   const proc = Bun.spawn(
-    [
-      process.execPath,
-      "build",
-      "--compile",
-      "--minify",
-      `--outfile=${distPath}`,
-      entryPoint,
-    ],
+    [process.execPath, join(import.meta.dir, "build.js"), distPath],
     { stdout: "pipe", stderr: "pipe" }
   );
 
@@ -81,4 +73,3 @@ run().catch(err => {
   console.error(red(`✖ Installation failed: ${err?.message || err}`));
   process.exit(1);
 });
-

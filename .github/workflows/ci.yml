@@ -26,16 +26,21 @@ jobs:
           bun-version: latest
 
       - name: Setup Node.js
-        if: matrix.runtime != 'bun'
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
+      - name: Install Dependencies
+        run: npm ci
+
       - name: Run Tests (Bun)
         if: matrix.runtime == 'bun'
-        run: bun test
+        run: npm test
 
       - name: Run Smoke Test (Node)
         if: matrix.runtime != 'bun'
         run: node bin/cli.js --help
 
+      - name: Run Proxy Tests (Node)
+        if: matrix.runtime != 'bun'
+        run: node --test test/proxy.test.js
