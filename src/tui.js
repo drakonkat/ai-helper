@@ -18,6 +18,7 @@ import {
   yellow,
 } from "./utils/format.js";
 import { killProcessTree, openBrowser } from "./utils/process.js";
+import { getServiceVersions } from "./utils/versions.js";
 import {
   baseUrl,
   diffRates,
@@ -29,6 +30,7 @@ import {
 } from "./utils/metrics.js";
 
 const TICK_MS = 1000;
+const VERSION_CHECK_MS = 5 * 60 * 1000;
 const MAX_EVENTS = 200;
 
 const ALT_SCREEN_ON = "\x1b[?1049h";
@@ -125,8 +127,13 @@ function paintNode(node) {
 }
 
 export class Dashboard {
-  constructor() {
+  constructor({ getVersions = getServiceVersions } = {}) {
     this.statuses = [];
+    this.getVersions = getVersions;
+    this.versions = {};
+    this.versionsKey = "";
+    this.versionsAt = 0;
+    this.versionsLoading = false;
     this.metrics = null;
     this.rates = {};
     this.prevMetrics = null;
@@ -151,6 +158,30 @@ export class Dashboard {
     return this.statuses[this.selected];
   }
 
+  /** Checks versions independently of the one-second status/metrics refresh. */
+  async refreshVersions() {
+    const key = JSON.stringify(this.statuses.map(s => [s.id, s.status, s.pid, s.url]));
+    if (key !== this.versionsKey) {
+      this.versionsKey = key;
+      this.versionsAt = 0;
+      this.versions = {};
+    }
+    if (this.versionsLoading || (this.versionsAt && Date.now() - this.versionsAt < VERSION_CHECK_MS)) return;
+
+    this.versionsLoading = true;
+    try {
+      const versions = await this.getVersions(this.statuses);
+      if (key === this.versionsKey) this.versions = versions;
+    } catch {
+      // An unavailable registry must not interrupt service controls or metrics.
+      if (key === this.versionsKey) this.versions = {};
+    } finally {
+      if (key === this.versionsKey) this.versionsAt = Date.now();
+      this.versionsLoading = false;
+      this.render();
+    }
+  }
+
   /**
    * One data tick. Every source is optional: a failing fetch degrades its own
    * panel and never breaks the loop.
@@ -160,6 +191,7 @@ export class Dashboard {
     this.refreshing = true;
     try {
       this.statuses = await manager.getStatus();
+      void this.refreshVersions();
       if (this.selected >= this.statuses.length) {
         this.selected = Math.max(0, this.statuses.length - 1);
       }
@@ -219,16 +251,26 @@ export class Dashboard {
       " ",
       "SERVICE",
       "STATUS",
+      "VERSION",
+      "UPDATE",
       { header: "PID", align: "right" },
       { header: "UPTIME", align: "right" },
       "URL",
     ];
     const rows = this.statuses.map((s, idx) => {
       const active = idx === this.selected;
+      const version = this.versions[s.id];
+      const update = version?.updateAvailable === true
+        ? yellow(bold(`↑ ${version.latestVersion}`))
+        : version?.updateAvailable === false
+          ? green("aggiornato")
+          : dim(this.versionsLoading && !version ? "verifica..." : "n/d");
       return [
         active ? cyan(bold(">")) : " ",
         active ? bold(white(s.id)) : bold(s.id),
         badgeStatus(s.status),
+        version?.version || dim("n/d"),
+        update,
         s.pid ? String(s.pid) : dim("-"),
         s.status === "running" ? s.uptime : dim("-"),
         s.status === "running" && s.url && s.url !== "-" ? cyan(underline(s.url)) : dim(s.url || "-"),

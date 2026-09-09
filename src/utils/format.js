@@ -158,3 +158,22 @@ export function printBanner() {
   );
 }
 
+export function printStartBanner(ids) {
+  printBanner();
+  console.log(cyan(`Starting service(s): ${ids.join(", ")}...\n`));
+}
+
+export async function printServiceStart(id, start) {
+  process.stdout.write(`  Launching ${bold(id)}... `);
+  try {
+    const result = await start();
+    if (!result.success) console.log(red(`failed: ${result.message}`));
+    else if (result.alreadyRunning) console.log(yellow(`already running (PID: ${result.pid})`));
+    else console.log(green(`started (PID: ${result.pid})`));
+    return result;
+  } catch (error) {
+    console.log(red(`failed: ${error.message}`));
+    throw error;
+  }
+}
+

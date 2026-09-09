@@ -121,6 +121,13 @@ agentmemory   ● RUNNING   44600   1h 32m   http://localhost:3113    npx @agent
 Use 'aih open [service]' to open dashboards in browser or 'aih start' to launch.
 ```
 
+Run `aih status --ui` in a terminal for the interactive live dashboard. Its
+`VERSION` column shows the running service version when available, otherwise the
+installed version. `UPDATE` shows `↑ <version>` for an available update,
+`aggiornato` when no newer version is found, or `n/d` when the check cannot be
+completed. Checks query npm/PyPI in the background every five minutes and after
+a service restart; they never install or update services.
+
 ---
 
 ### 2. Open Dashboards in Browser
@@ -147,6 +154,37 @@ aih start
 aih start pxpipe
 aih start agentmemory
 ```
+
+### Astra / `--gpt` (Windows)
+
+```powershell
+aih start --gpt
+aih start --gpt --json
+```
+
+Uses the configured Windows compression stack: starts OCX when needed, then pxpipe on **47822** and Headroom on **8788**, and selects **gpt-6-astra** with the `pxpipe-codex` provider in Codex's user config. Requests follow **Codex → Headroom → pxpipe → OCX → ChatGPT subscription**. OCX retains its canonical OpenAI endpoint and uses account pool mode; Anthropic's OCX endpoint is direct to avoid a routing loop.
+
+The provider keeps `requires_openai_auth = true` so Codex shows your signed-in ChatGPT profile. `experimental_bearer_token = "local-proxy"` keeps model requests using the local placeholder credential; OCX supplies the real upstream credentials. Both settings are needed: enabling OpenAI auth alone sends the ChatGPT token to the proxies and can break Claude routing. Reopen Codex if an already-running app still displays the provider label after this configuration change.
+
+The startup uses the same banner, colors and per-process output as plain `aih start`, including the actual listening PID:
+
+```text
+Starting service(s): ocx, pxpipe, headroom...
+
+  Launching ocx... already running (PID: 1100)
+  Launching pxpipe... started (PID: 2200)
+  Launching headroom... started (PID: 3300)
+```
+
+The JavaScript launchers are **included in the package and standalone build**; no external `.ps1` files are required. Install/login to OCX and install Node.js, pxpipe-proxy and Headroom first. AIH finds Node and Headroom through `PATH` (also `~/.local/bin/headroom.exe`), and pxpipe through global npm or its npm cache, without fixed cache hashes or user-specific paths. Missing dependencies produce an installation hint; AIH does not install tools or create subscription credentials.
+
+Paths default to the current user's home and respect `CODEX_HOME`, `APPDATA`, `LOCALAPPDATA`, `XDG_CONFIG_HOME`, and npm's cache/prefix configuration. Nonstandard installations can set `NODE_BINARY`, `PXPIPE_CLI_PATH` (the package's `bin/cli.js`) and `HEADROOM_BINARY`. Existing `PXPIPE_CONFIG`, `PXPIPE_LOG`, `PXPIPE_GPT_PROFILES`, `HEADROOM_WORKSPACE_DIR`, `HEADROOM_CONFIG_DIR` and `HEADROOM_SETTINGS_PATH` overrides are supported. The bundled Astra compression profile matches the previous launcher; Headroom runs with `--lossless --no-cache`.
+
+Startup follows dependency order (OCX, pxpipe, Headroom); **requests flow the other way: Headroom → pxpipe → OCX**, which selects the final endpoint by model. Both pxpipe upstreams point to OCX on 10100. Hidden, on-demand Windows tasks named `AIH-GPT-<user>-pxpipe` and `AIH-GPT-<user>-headroom` keep the proxies alive independently of Codex, without boot/login triggers or external script files. Logs are `gpt-<service>.stdout.log` / `gpt-<service>.stderr.log` in `~/.pxpipe` and the Headroom workspace. Healthy existing instances are reused, including instances started by the old launchers; existing external scripts/tasks are not removed or changed. An occupied but unhealthy port fails its readiness check rather than spawning a duplicate.
+
+Plain `aih start`, stop/restart and the TUI retain their existing service behavior; use `aih start --gpt` to bring up/check this chain and its printed URLs to access its dashboards. `--json` prints only JSON, including a `services` array with process IDs and already-running status.
+
+The command backs up configuration files under `~/.aih/backups/gpt-*`, checks Headroom's actual upstream settings and verifies that Astra appears in the model catalog through the chain. AIH selects Astra last, after these checks. OCX can also sync Codex config during its own cold startup, so AIH saves the original before starting OCX; that backup remains available if startup fails. **Start a new Codex task** afterward: existing tasks can retain their old provider even after restarting the app. The existing pxpipe compression profile and Headroom compression options are preserved.
 
 ---
 

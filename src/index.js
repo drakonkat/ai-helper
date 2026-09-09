@@ -8,6 +8,8 @@ import {
   gray,
   green,
   printBanner,
+  printStartBanner,
+  printServiceStart,
   red,
   renderTable,
   yellow,
@@ -44,6 +46,7 @@ ${bold("OPTIONS:")}
   ${gray("-n, --lines <num>")}     Number of log lines to show (default: 50)
   ${gray("-f, --follow")}          Follow log output in real-time
   ${gray("--json")}                Output results in JSON format
+  ${gray("--gpt")}                 Start the configured Windows Astra chain (start/up only)
   ${gray("-ui, --ui")}             Open the interactive dashboard (status only, requires a TTY)
 
 ${bold("EXAMPLES:")}
@@ -51,6 +54,7 @@ ${bold("EXAMPLES:")}
   ${dim("$")} ${cyan(CLI_NAME)} open                ${dim("# Opens all running dashboards in browser")}
   ${dim("$")} ${cyan(CLI_NAME)} open agentmemory    ${dim("# Opens agentmemory dashboard")}
   ${dim("$")} ${cyan(CLI_NAME)} start
+  ${dim("$")} ${cyan(CLI_NAME)} start --gpt        ${dim("# OCX -> pxpipe -> Headroom, Codex model: Astra")}
   ${dim("$")} ${cyan(CLI_NAME)} stop pxpipe
   ${dim("$")} ${cyan(CLI_NAME)} restart ocx
   ${dim("$")} ${cyan(CLI_NAME)} logs pxpipe -f
@@ -137,6 +141,7 @@ export async function main() {
   let jsonOutput = false;
   let follow = false;
   let uiMode = false;
+  let gptMode = false;
   let lines = 50;
   const positionalArgs = [];
 
@@ -144,6 +149,8 @@ export async function main() {
     const arg = rawArgs[i];
     if (arg === "--json") {
       jsonOutput = true;
+    } else if (arg === "--gpt") {
+      gptMode = true;
     } else if (arg === "-ui" || arg === "--ui") {
       uiMode = true;
     } else if (arg === "-f" || arg === "--follow") {
@@ -171,6 +178,23 @@ export async function main() {
 
   const command = positionalArgs[0]?.toLowerCase() || "status";
   const targets = positionalArgs.slice(1);
+
+  if (gptMode) {
+    if (!["start", "up"].includes(command) || targets.length || uiMode) {
+      throw new Error("Use 'aih start --gpt' without service names or --ui.");
+    }
+    const { startGpt, GPT_SERVICE_IDS } = await import("./gpt.js");
+    if (!jsonOutput) printStartBanner(GPT_SERVICE_IDS);
+    const result = await startGpt({ manager, withProgress: jsonOutput ? undefined : printServiceStart });
+    if (jsonOutput) console.log(JSON.stringify(result, null, 2));
+    else {
+      console.log("");
+      console.log(green(`Astra ready: Codex -> Headroom (${result.urls.headroom}) -> pxpipe (${result.urls.pxpipe}) -> OCX (${result.urls.ocx}) -> model endpoint`));
+      console.log(result.note);
+      if (result.backupDir) console.log(`Configuration backups: ${result.backupDir}`);
+    }
+    return;
+  }
 
   switch (command) {
     case "status":
@@ -243,22 +267,11 @@ export async function main() {
 
     case "start":
     case "up": {
-      printBanner();
       const svcsToStart = targets.length > 0 ? targets : SERVICE_IDS;
-      console.log(cyan(`Starting service(s): ${svcsToStart.join(", ")}...\n`));
+      printStartBanner(svcsToStart);
 
       for (const id of svcsToStart) {
-        process.stdout.write(`  Launching ${bold(id)}... `);
-        const res = await manager.startService(id);
-        if (res.success) {
-          if (res.alreadyRunning) {
-            console.log(yellow(`already running (PID: ${res.pid})`));
-          } else {
-            console.log(green(`started (PID: ${res.pid})`));
-          }
-        } else {
-          console.log(red(`failed: ${res.message}`));
-        }
+        await printServiceStart(id, () => manager.startService(id));
       }
       console.log("");
       break;

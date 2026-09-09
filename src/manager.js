@@ -58,7 +58,7 @@ export class ServiceManager {
     let needsSave = false;
 
     // Discover active verified daemon processes from OS
-    const discovered = await discoverRunningProcesses();
+    const discovered = await discoverRunningProcesses({ knownServices: state.services });
 
     for (const id of SERVICE_IDS) {
       const svc = state.services[id];

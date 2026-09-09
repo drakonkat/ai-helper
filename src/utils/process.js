@@ -246,9 +246,13 @@ const AGENTMEMORY_DEFAULT_VIEWER = 3113;
  * The engine port is the one that binds 0.0.0.0 and is usually discovered first,
  * but the only browsable dashboard is the viewer, so derive it from the anchor.
  * @param {number[]} ports
+ * @param {number[]} [viewerPorts] Ports owned by the Node viewer, not the iii engine.
  * @returns {number}
  */
-export function resolveAgentmemoryViewerPort(ports) {
+export function resolveAgentmemoryViewerPort(ports, viewerPorts = []) {
+  // The Node viewer and iii engine can own different parts of the port quartet.
+  const visibleViewerPorts = [...new Set(viewerPorts.filter(p => Number.isFinite(p) && p > 0))];
+  if (visibleViewerPorts.length === 1) return visibleViewerPorts[0];
   const candidates = (ports || []).filter(p => Number.isFinite(p) && p > 0);
   if (candidates.length === 0) return AGENTMEMORY_DEFAULT_VIEWER;
 
@@ -264,164 +268,106 @@ export function resolveAgentmemoryViewerPort(ports) {
   return Math.min(...candidates) + AGENTMEMORY_VIEWER_OFFSET;
 }
 
+/** Resolve services from one Windows process/port snapshot, including child workers. */
+export function discoverWindowsProcesses(data, { knownServices = {}, currentPid = process.pid, isRunning = isPidRunning } = {}) {
+  const array = value => value ? (Array.isArray(value) ? value : [value]) : [];
+  const procs = array(data?.Procs).filter(p => p.ProcessId && p.ProcessId !== currentPid);
+  const ports = array(data?.Ports).filter(p => p.LocalPort > 0 && p.OwningProcess > 0);
+  const byPid = new Map(procs.map(p => [p.ProcessId, p]));
+  const children = new Map();
+  const ownedPorts = new Map();
+  for (const p of procs) children.set(p.ParentProcessId, [...(children.get(p.ParentProcessId) || []), p]);
+  for (const p of ports) ownedPorts.set(p.OwningProcess, [...(ownedPorts.get(p.OwningProcess) || []), p]);
+  const runtime = p => /^(node|bun|python[\d.]*|headroom|ocx|iii|cmd|powershell|pwsh)(\.exe)?$/i.test(p.Name || "");
+  const engine = p => /^iii(?:\.exe)?$/i.test(p.Name || "");
+
+  function serviceOf(p) {
+    if (!runtime(p)) return;
+    const cmd = (p.CommandLine || "").replace(/\\/g, "/").toLowerCase();
+    // Do not exclude every bin/cli.js: pxpipe's real daemon uses that filename too.
+    if (/aih_gpt_launcher|get-ciminstance|where-object|(?:ai-helper|\.aih)\/(?:bin\/cli|src\/index)\.js/.test(cmd)) return;
+    if (/agentmemory-mcp|@agentmemory\/mcp|\bagentmemory\s+mcp\b|cli\.mjs["']?\s+mcp\b/.test(cmd)) return;
+    if (cmd.includes("pxpipe-proxy")) return "pxpipe";
+    if (cmd.includes("ocx.mjs") || (cmd.includes("opencodex") && !cmd.includes(".ps1")) || /\bocx(?:\.exe)?["']?\s+start\b/.test(cmd)) return "ocx";
+    if (engine(p) || /@agentmemory\/agentmemory|agentmemory\/dist\/cli\.mjs|iii-config\.yaml/.test(cmd)) return "agentmemory";
+    if (/headroom(?:\.exe)?["']?\s+proxy\b/.test(cmd)) return "headroom";
+  }
+
+  const discovered = {};
+  const ranks = {};
+  for (const seed of procs) {
+    let id = serviceOf(seed);
+    // Elevated processes may hide their command lines; a recorded PID still identifies their tree.
+    if (!id && !seed.CommandLine && runtime(seed)) {
+      id = Object.keys(knownServices).find(id => knownServices[id]?.pid === seed.ProcessId);
+    }
+    if (!id) continue;
+    let root = seed;
+    if (id === "agentmemory" && engine(seed)) {
+      const parent = byPid.get(seed.ParentProcessId);
+      if (parent && /^(node|bun)(\.exe)?$/i.test(parent.Name || "") &&
+          (!parent.CommandLine || serviceOf(parent) === id)) root = parent;
+    }
+    const family = new Map();
+    const pending = [root];
+    while (pending.length) {
+      const p = pending.pop();
+      if (family.has(p.ProcessId)) continue;
+      family.set(p.ProcessId, p);
+      pending.push(...(children.get(p.ProcessId) || []));
+    }
+    const listeners = [...family.keys()].flatMap(pid => ownedPorts.get(pid) || []);
+    if (!listeners.length) continue; // Shells, editors and hooks are not running daemons.
+    const available = listeners.map(p => p.LocalPort);
+    let port;
+    if (id === "agentmemory") {
+      const enginePorts = listeners.filter(p => engine(family.get(p.OwningProcess))).map(p => p.LocalPort);
+      const viewerPorts = listeners.filter(p => /^(node|bun)(\.exe)?$/i.test(family.get(p.OwningProcess)?.Name || "")).map(p => p.LocalPort);
+      port = resolveAgentmemoryViewerPort(enginePorts.length ? enginePorts : available, viewerPorts);
+    } else {
+      const explicit = Number(seed.CommandLine?.match(/\s--port(?:=|\s+)(\d+)/i)?.[1]);
+      const defaults = { pxpipe: [47822, 47821], headroom: [8788, 8787], ocx: [10100] };
+      port = [explicit, ...(defaults[id] || []), ...available].find(p => available.includes(p));
+    }
+    const owner = family.get((listeners.find(p => p.LocalPort === port) || listeners[0]).OwningProcess);
+    if (!isRunning(owner.ProcessId)) continue;
+    const rank = family.has(knownServices[id]?.pid) ? 1 : 0;
+    if (discovered[id] && ranks[id] >= rank) continue;
+    const date = owner.CreationDate;
+    const match = String(date || "").match(/\/Date\((\d+)\)\//);
+    const started = new Date(match ? Number(match[1]) : date || NaN);
+    discovered[id] = {
+      pid: owner.ProcessId,
+      command: owner.CommandLine || seed.CommandLine || knownServices[id]?.command || id,
+      startedAt: !isNaN(started.getTime()) ? started.toISOString() : undefined,
+      port,
+      url: `http://localhost:${port}${id === "headroom" ? "/dashboard" : ""}`,
+    };
+    ranks[id] = rank;
+  }
+  return discovered;
+}
+
 /**
  * Scans the OS process table and listening ports to discover active services and their URLs.
  * @returns {Promise<Record<string, { pid: number; command: string; startedAt?: string; url?: string }>>}
  */
-export async function discoverRunningProcesses() {
+export async function discoverRunningProcesses({ knownServices = {} } = {}) {
   const discovered = {};
   const currentPid = process.pid;
 
   if (process.platform === "win32") {
     try {
+      // Keep parents and children even when elevation hides their command lines.
       const script = `
-       $procs = Get-CimInstance Win32_Process | Where-Object { 
-         $_.ProcessId -ne ${currentPid} -and 
-         $_.CommandLine -and 
-          ($_.CommandLine -match 'pxpipe-proxy|ocx|agentmemory|iii|headroom') -and 
-         ($_.CommandLine -notmatch 'ai-helper|\\baih(\\.exe)?\\b|bin\\\\cli\\.js|Get-CimInstance|Where-Object|Select-Object')
-       } | Select-Object ProcessId, ParentProcessId, Name, CommandLine, CreationDate
-
-        $ports = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Select-Object LocalPort, OwningProcess
-
+        $procs = Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne ${currentPid} } |
+          Select-Object ProcessId, ParentProcessId, Name, CommandLine, CreationDate
+        $ports = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+          Select-Object LocalPort, OwningProcess
         @{ Procs = $procs; Ports = $ports } | ConvertTo-Json -Depth 3
       `;
-
       const res = await execCommand("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script]);
-      if (!res.stdout.trim()) return discovered;
-
-      let data;
-      try {
-        data = JSON.parse(res.stdout.trim());
-      } catch {
-        return discovered;
-      }
-
-      const procList = data?.Procs ? (Array.isArray(data.Procs) ? data.Procs : [data.Procs]) : [];
-      const portList = data?.Ports ? (Array.isArray(data.Ports) ? data.Ports : [data.Ports]) : [];
-
-      const pidToPorts = {};
-      for (const p of portList) {
-        if (p?.OwningProcess && p?.LocalPort) {
-          if (!pidToPorts[p.OwningProcess]) pidToPorts[p.OwningProcess] = [];
-          pidToPorts[p.OwningProcess].push(p.LocalPort);
-        }
-      }
-
-      for (const item of procList) {
-        const cmd = item.CommandLine || "";
-        const pid = item.ProcessId;
-        if (!pid || pid === currentPid || !isPidRunning(pid)) continue;
-
-        // Skip any ai-helper / aih CLI executions
-        if (cmd.includes("bin/cli.js") || cmd.includes("bin\\cli.js") || /\baih(\.exe)?\b/i.test(cmd)) {
-          continue;
-        }
-
-        let startedAt;
-        if (item.CreationDate) {
-          const match = String(item.CreationDate).match(/\/Date\((\d+)\)\//);
-          if (match) {
-            startedAt = new Date(parseInt(match[1], 10)).toISOString();
-          } else {
-            const d = new Date(item.CreationDate);
-            if (!isNaN(d.getTime())) {
-              startedAt = d.toISOString();
-            }
-          }
-        }
-
-        const ports = pidToPorts[pid] || [];
-
-        // 1. pxpipe
-        if (cmd.includes("pxpipe-proxy")) {
-          if (!discovered.pxpipe || (item.Name && item.Name.toLowerCase() === "node.exe" && cmd.includes("cli.js"))) {
-            const webPort = ports.find(p => p > 1000 && p < 65000) || (discovered.pxpipe?.port);
-            discovered.pxpipe = {
-              pid,
-              command: cmd,
-              startedAt,
-              port: webPort,
-              url: webPort ? `http://localhost:${webPort}` : "http://localhost:47821",
-            };
-          }
-        }
-
-        // 2. ocx
-        if (cmd.includes("ocx.mjs") || cmd.includes("opencodex") || (cmd.includes("ocx start") && !cmd.includes("aih "))) {
-          const webPort = ports.find(p => p === 10100 || (p > 1000 && p < 65000));
-          if (!discovered.ocx || cmd.includes("ocx.mjs start")) {
-            discovered.ocx = {
-              pid,
-              command: cmd,
-              startedAt,
-              port: webPort || 10100,
-              url: `http://localhost:${webPort || 10100}`,
-            };
-          }
-        }
-
-        // 3. agentmemory (daemon / iii-engine only, strictly exclude MCP stdio shims)
-        const isMcpShim = cmd.includes("agentmemory-mcp") || cmd.includes("@agentmemory/mcp") || cmd.includes("agentmemory mcp");
-
-        if (
-          !isMcpShim &&
-          (cmd.includes("@agentmemory/agentmemory") ||
-            cmd.includes("agentmemory\\dist\\cli.mjs") ||
-            cmd.includes("agentmemory/dist/cli.mjs") ||
-            cmd.includes("iii-config.yaml") ||
-            cmd.includes("iii.exe") ||
-            (cmd.includes("agentmemory") && !cmd.includes("mcp") && !cmd.includes("aih ")))
-        ) {
-          // agentmemory opens a port quartet from one anchor N: REST N, streams N+1,
-          // viewer N+2, engine N+46023. Only the viewer is a dashboard, so never point
-          // the URL at the engine port even though it is the one usually listening.
-          const viewerPort = resolveAgentmemoryViewerPort(ports);
-         if (!discovered.agentmemory || cmd.includes("agentmemory/agentmemory") || cmd.includes("dist\\cli.mjs")) {
-           discovered.agentmemory = {
-             pid,
-             command: cmd,
-             startedAt,
-             port: viewerPort,
-             url: `http://localhost:${viewerPort}`,
-           };
-         }
-       }
-
-        // 4. headroom
-        if (cmd.includes("headroom proxy") || (cmd.includes("headroom") && !cmd.includes("aih "))) {
-          const webPort = ports.find(p => p === 8787 || (p > 1000 && p < 65000));
-          if (!discovered.headroom || cmd.includes("headroom proxy")) {
-            discovered.headroom = {
-              pid,
-              command: cmd,
-              startedAt,
-              port: webPort || 8787,
-              url: `http://localhost:${webPort || 8787}/dashboard`,
-            };
-          }
-        }
-     }
-
-     for (const p of procList) {
-       const ports = pidToPorts[p.ProcessId] || [];
-       if (ports.length > 0) {
-         if (ports.includes(47821) && discovered.pxpipe) {
-           discovered.pxpipe.url = "http://localhost:47821";
-         }
-         if (ports.includes(10100) && discovered.ocx) {
-           discovered.ocx.url = "http://localhost:10100";
-         }
-         if (discovered.agentmemory && p.ProcessId === discovered.agentmemory.pid) {
-           const viewerPort = resolveAgentmemoryViewerPort(ports);
-           discovered.agentmemory.port = viewerPort;
-           discovered.agentmemory.url = `http://localhost:${viewerPort}`;
-         }
-          if (ports.includes(8787) && discovered.headroom) {
-            discovered.headroom.url = "http://localhost:8787/dashboard";
-          }
-       }
-     }
+      if (res.stdout.trim()) return discoverWindowsProcesses(JSON.parse(res.stdout), { knownServices });
     } catch {}
   } else {
     try {
