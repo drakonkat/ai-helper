@@ -7,3 +7,4 @@ dist/
 .DS_Store
 Thumbs.db
 .idea/
+benchmark-results/

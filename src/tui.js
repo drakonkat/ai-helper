@@ -370,6 +370,7 @@ export class Dashboard {
       `${dim("r")} restart`,
       `${dim("k")} kill`,
       ...(svc?.dashboardUrl ? [`${dim("o")} dashboard`] : []),
+      ...(svc?.repositoryUrl ? [`${dim("g")} GitHub`] : []),
     ], width, "  ", "");
     const footerLines = keyLines.length + 2;
 
@@ -387,6 +388,7 @@ export class Dashboard {
       "UPDATE",
       { header: "PID", align: "right" },
       { header: "UPTIME", align: "right" },
+      "REPO",
       "URL",
     ];
     const rows = this.statuses.map((s, idx) => {
@@ -405,6 +407,7 @@ export class Dashboard {
         update,
         s.pid ? String(s.pid) : dim("-"),
         s.status === "running" ? s.uptime : dim("-"),
+        s.repositoryUrl ? cyan(underline(s.repositoryUrl.replace("https://github.com/", ""))) : dim("-"),
         s.id === "proxy" ? dim(`${s.url} (proxy)`) : s.status === "running" && s.url && s.url !== "-" ? cyan(underline(s.url)) : dim(s.url || "-"),
       ];
     });
@@ -413,6 +416,13 @@ export class Dashboard {
       for (const line of table) lines.push(line);
     } else {
       lines.push(dim("  No services."));
+    }
+    if (svc?.repositoryUrl) {
+      // Keep both full links accessible when terminal width clips their columns.
+      lines.push(...wrapCells([
+        ...(svc.url && svc.url !== "-" ? [`${dim("URL:")} ${cyan(underline(svc.url))}`] : []),
+        `${dim("GitHub (g):")} ${cyan(underline(svc.repositoryUrl))}`,
+      ], width));
     }
     lines.push("");
 
@@ -511,8 +521,9 @@ export class Dashboard {
 
     try {
       const res = await action(svc);
-      const message = res?.message || `${label} ${svc.id}: fatto`;
-      this.status = res && res.success === false ? red(message) : green(message);
+      const message = [res?.message || `${label} ${svc.id}: fatto`, res?.codexConfig?.message].filter(Boolean).join(" | ");
+      this.status = res && res.success === false ? red(message)
+        : res?.codexConfig?.status === "warning" ? yellow(message) : green(message);
     } catch (err) {
       this.status = red(`${label} ${svc.id}: ${err?.message || err}`);
     } finally {
@@ -565,6 +576,13 @@ export class Dashboard {
         this.runAction("Dashboard", async svc => {
           const opened = await manager.openDashboard([svc.id]);
           return { success: opened.length > 0, message: opened.length ? `Aperto ${opened[0].url}` : "Nessuna dashboard disponibile" };
+        });
+        return;
+      case "g":
+        if (!this.currentService()?.repositoryUrl) return;
+        this.runAction("GitHub", async svc => {
+          const opened = await manager.openRepository([svc.id]);
+          return { success: opened.length > 0, message: opened.length ? `Aperto ${opened[0].url}` : "Nessun repository disponibile" };
         });
         return;
       default:

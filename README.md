@@ -87,13 +87,13 @@ bun add -g @drakonkat/ai-helper
 
 ## 📦 Managed Services & Dashboards
 
-| Service | Background Command | Default Port / URL | Description |
-| :--- | :--- | :--- | :--- |
-| **`pxpipe`** | `npx pxpipe-proxy` | [`http://localhost:47821`](http://localhost:47821) | AI LLM & MCP protocol reverse proxy bridge |
-| **`ocx`** | `ocx start` | [`http://localhost:10100`](http://localhost:10100) | OpenCode interpreter execution daemon |
-| **`agentmemory`** | `npx @agentmemory/agentmemory` | [`http://localhost:3113`](http://localhost:3113) | Persistent agent long-term memory server & viewer |
-| **`headroom`** | `headroom proxy` | [`http://localhost:8787/dashboard`](http://localhost:8787/dashboard) | Context optimization & LLM compression proxy |
-| **`proxy`** | `aih start proxy <upstream>` | `http://127.0.0.1:10101` | HTTP/SSE/WebSocket forwarding with optional presets; **no web dashboard** |
+| Service | Background Command | Default Port / URL | GitHub | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| **`pxpipe`** | `npx pxpipe-proxy` | [`http://localhost:47821`](http://localhost:47821) | [teamchong/pxpipe](https://github.com/teamchong/pxpipe) | AI LLM & MCP protocol reverse proxy bridge |
+| **`ocx`** | `ocx start` | [`http://localhost:10100`](http://localhost:10100) | [lidge-jun/opencodex](https://github.com/lidge-jun/opencodex) | OpenCode interpreter execution daemon |
+| **`agentmemory`** | `npx @agentmemory/agentmemory` | [`http://localhost:3113`](http://localhost:3113) | [rohitg00/agentmemory](https://github.com/rohitg00/agentmemory) | Persistent agent long-term memory server & viewer |
+| **`headroom`** | `headroom proxy` | [`http://localhost:8787/dashboard`](http://localhost:8787/dashboard) | [headroomlabs-ai/headroom](https://github.com/headroomlabs-ai/headroom) | Context optimization & LLM compression proxy |
+| **`proxy`** | `aih start proxy <upstream>` | `http://127.0.0.1:10101` | [drakonkat/ai-helper](https://github.com/drakonkat/ai-helper) | HTTP/SSE/WebSocket forwarding with optional presets; **no web dashboard** |
 
 ---
 
@@ -125,16 +125,23 @@ aih
 ```text
 ai-helper v1.1.1 — Background AI Ecosystem Service Manager
 
-SERVICE       STATUS        PID   UPTIME   ADDRESS                  COMMAND
-───────────   ─────────   ─────   ──────   ──────────────────────   ────────────────────────────
-pxpipe        ● RUNNING   36212   1h 42m   http://localhost:47821   npx pxpipe-proxy
-ocx           ● RUNNING   31540      54s   http://localhost:10100   ocx start
-agentmemory   ● RUNNING   44600   1h 32m   http://localhost:3113    npx @agentmemory/agentmemory
+SERVICE       STATUS        PID   UPTIME   ADDRESS                  REPO                                       COMMAND
+───────────   ─────────   ─────   ──────   ──────────────────────   ─────────────────────────────────────────  ────────────────────────────
+pxpipe        ● RUNNING   36212   1h 42m   http://localhost:47821   https://github.com/teamchong/pxpipe         npx pxpipe-proxy
+ocx           ● RUNNING   31540      54s   http://localhost:10100   https://github.com/lidge-jun/opencodex      ocx start
+agentmemory   ● RUNNING   44600   1h 32m   http://localhost:3113    https://github.com/rohitg00/agentmemory     npx @agentmemory/agentmemory
 
 Use 'aih open [service]' to open dashboards in browser or 'aih start' to launch.
 ```
 
 Run `aih status --ui` in a terminal for the interactive live dashboard. Its
+`REPO` column shows the GitHub owner/repository; the selected service's full
+repository and dashboard URLs appear below the table. Press **`g`** to open its
+repository. Plain `status` prints full repository links, and `status --json`
+includes `repositoryUrl` (null for custom services without metadata). The built-in
+proxy links to ai-helper's repository, not its forwarding address.
+
+The dashboard's
 `VERSION` column shows the running service version when available, otherwise the
 installed version. `UPDATE` shows `↑ <version>` for an available update,
 `aggiornato` when no newer version is found, or `n/d` when the check cannot be
@@ -164,6 +171,10 @@ aih open
 aih open agentmemory      # Opens http://localhost:3113
 aih open ocx              # Opens http://localhost:10100
 aih open pxpipe           # Opens http://localhost:47821
+
+# Open a repository instead of a dashboard (also works for the built-in proxy)
+aih open ocx --repo
+aih open proxy --repo
 ```
 
 ---
@@ -249,11 +260,54 @@ aih status -ui
 aih logs proxy -f
 ```
 
-Set your client's API base URL to **`http://127.0.0.1:10102/v1`**. The client
+Codex's two root base URLs are configured automatically after aih's proxy starts
+successfully (see below). For other clients, set the API base URL to
+**`http://127.0.0.1:10102/v1`**. The client
 must connect to `10102` for these presets and statistics to run; connecting
 directly to OpenCodex (`10100`), Headroom (`8787`) or pxpipe (`47821`) bypasses
 this aih proxy. Keep the client's existing credentials and selected model.
-The proxy does not change client configuration for you.
+Other clients are not configured automatically.
+
+### Automatic Codex configuration
+
+After `aih start proxy` / `aih restart proxy`, and after `aih start ocx` /
+`aih restart ocx` when an aih-managed proxy is running, aih sets these **root**
+keys in `$CODEX_HOME/config.toml` (default: `~/.codex/config.toml`):
+
+```toml
+openai_base_url = "http://127.0.0.1:10102/v1"
+experimental_realtime_ws_base_url = "http://127.0.0.1:10102/v1"
+```
+
+The URL uses the proxy's **actual bound host and port**, including dynamically
+allocated ports, never its upstream address. Both keys use the HTTP base URL;
+the realtime client handles the WebSocket transport. `start` on an already-running
+service also reconciles the settings, and TUI start/restart actions use the same path.
+When starting ocx, or a proxy targeting a known running ocx, aih waits up to 30 seconds
+for ocx's `/readyz` response (`service: opencodex`, `status: ready`) before writing:
+a live process or `/healthz` alone can precede ocx's own Codex configuration writes.
+Older ocx versions without this readiness contract produce a warning rather than
+risk a competing write. Neither credentials nor ocx's upstream/provider settings
+are changed.
+
+Automatic configuration targets root upstream URLs. For upstreams with a path
+prefix (for example `/v1` or `/backend-api/codex`), aih warns and leaves Codex's
+URLs unchanged: those routes require an explicitly chosen client base path to
+avoid duplicating the API prefix.
+
+Comments, line endings and other TOML settings are preserved. A first-write backup
+of an existing file is kept at `config.toml.aih.bak` and never overwritten; a missing
+config is created. Writes are locked and atomic. Invalid TOML, conflicting active
+profile URL overrides, links, concurrent modifications, or filesystem errors leave
+the config unchanged and produce a warning without stopping a successfully started
+service. Profile/provider tables are never rewritten. Profiles selected explicitly
+by a client and environment/CLI overrides can still take precedence over these root keys.
+
+Set **`AIH_CODEX_AUTOCONFIG=0`** to disable this behavior, including in automation.
+`status` and discovery are read-only with respect to Codex. Stopping the proxy does
+not restore previous settings automatically; reconnect/reconfigure Codex before
+using it without the proxy. Restart an already-open Codex client if it cached its
+configuration. JSON start/restart results include a `codexConfig` outcome.
 
 After the first start, use `restart` to change options; unspecified options are
 retained. Choose one of these alternatives:
@@ -336,14 +390,32 @@ subprotocol selection, ping/pong and close codes are relayed. `Host`, hop-by-hop
 headers and WebSocket handshake/framing are regenerated for each connection.
 TLS certificates are verified normally; HTTP body compression is preserved.
 
-This is a **reverse proxy**: it does not configure clients automatically, intercept
-unrelated machine traffic, implement CONNECT/TLS interception, or translate
+This is a **reverse proxy**: apart from the explicit Codex startup integration
+above, it does not configure clients, intercept unrelated machine traffic,
+implement CONNECT/TLS interception, or translate
 between AI API formats. Both sides must speak the same protocol. The listener
 accepts loopback addresses only. OpenCodex's
 [HTTP/SSE relay](https://github.com/lidge-jun/opencodex/blob/main/src/server/relay.ts)
 and [WebSocket bridge](https://github.com/lidge-jun/opencodex/blob/main/src/server/ws-bridge.ts)
 were reviewed as transport references; provider-specific rewriting is left to
 the upstream service or your interceptor.
+
+### Reproducible proxy benchmarks
+
+Compare the same corpus through real proxy presets without reconfiguring managed services
+or mixing the aih proxy statistics. Offline replay measures common token estimates, latency and
+information preservation; explicit `--live` adds provider usage and answer checks.
+
+```powershell
+npm run bench:proxy -- --presets none,pxpipe --formats responses --warmup 0 --repetitions 1
+npm run bench:proxy -- --headroom-url http://127.0.0.1:8787 --repetitions 5
+```
+
+Results include JSON, JSONL, CSV and Markdown. Unknown image costs are not counted
+as zero, and offline checks never claim a semantic-quality winner. Benchmark-only
+pxpipe allowlisting defaults to all fixture models so imaging is actually exercised.
+See [benchmark documentation](docs/benchmark.md) for corpus customization, live
+evaluation, privacy, limitations and quality/performance decision thresholds.
 
 ### Preset behavior
 

@@ -49,6 +49,7 @@ ${bold("OPTIONS:")}
   ${gray("-n, --lines <num>")}     Number of log lines to show (default: 50)
   ${gray("-f, --follow")}          Follow log output in real-time
   ${gray("--json")}                Output results in JSON format
+  ${gray("--repo")}                Open GitHub repositories instead of dashboards (open only)
   ${gray("--listen <http://host:port>")}  Proxy loopback listening address
   ${gray("--interceptor <file.mjs>")}     Proxy JavaScript hooks (loaded at startup)
   ${gray("--preset <name>")}              pxpipe | headroom | rtk | headroom-pxpipe | rtk-pxpipe | none
@@ -57,6 +58,10 @@ ${bold("OPTIONS:")}
   ${gray("--rtk-filter <name>")}          Fixed rtk pipe filter (default: auto-detect)
   ${gray("--max-body-bytes <num>")}       Proxy buffered request / WebSocket limit (default: 67108864)
   ${gray("-ui, --ui")}             Open the interactive dashboard (status only, requires a TTY)
+
+${bold("CODEX CONFIGURATION:")}
+  Starting aih's proxy, or ocx with an active proxy, updates Codex's two base URLs.
+  Respects CODEX_HOME; set AIH_CODEX_AUTOCONFIG=0 to leave config.toml untouched.
 
 ${bold("EXAMPLES:")}
   ${dim("$")} ${cyan("npx ai-helper")} status
@@ -72,6 +77,11 @@ ${bold("EXAMPLES:")}
 function printVersion() {
   const runtime = typeof Bun !== "undefined" ? `Bun ${Bun.version}` : `Node ${process.version}`;
   console.log(`${bold(cyan(CLI_NAME))} version ${bold(VERSION)} (${runtime}, ${process.platform}-${process.arch})`);
+}
+
+function printCodexConfig(result) {
+  const config = result.codexConfig;
+  if (config?.message) console.log((config.status === "warning" ? yellow : dim)(`  ${config.message}`));
 }
 
 async function runInstall() {
@@ -162,6 +172,7 @@ export async function main() {
     if (values.json) console.log(JSON.stringify(result));
     else if (result.success) console.log(green(`Proxy ${result.alreadyRunning ? "already running" : "started"} (PID: ${result.pid}) at ${result.url}`));
     else console.error(red(result.message));
+    if (!values.json) printCodexConfig(result);
     if (!result.success) process.exitCode = 1;
     return;
   }
@@ -169,6 +180,7 @@ export async function main() {
   let jsonOutput = false;
   let follow = false;
   let uiMode = false;
+  let repoMode = false;
   let lines = 50;
   const positionalArgs = [];
 
@@ -176,6 +188,8 @@ export async function main() {
     const arg = rawArgs[i];
     if (arg === "--json") {
       jsonOutput = true;
+    } else if (arg === "--repo") {
+      repoMode = true;
     } else if (arg === "-ui" || arg === "--ui") {
       uiMode = true;
     } else if (arg === "-f" || arg === "--follow") {
@@ -246,6 +260,7 @@ export async function main() {
         { header: "PID", align: "right" },
         { header: "UPTIME", align: "right" },
         "ADDRESS",
+        "REPO",
         "COMMAND",
       ];
 
@@ -257,6 +272,7 @@ export async function main() {
         s.id === "proxy" ? dim(`${s.url} (proxy)`) : s.status === "running" && s.url && s.url !== "-"
           ? cyan(underline(s.url))
           : dim(s.url || "-"),
+        s.repositoryUrl ? cyan(underline(s.repositoryUrl)) : dim("-"),
         dim(s.command),
       ]);
 
@@ -271,6 +287,12 @@ export async function main() {
     case "dash": {
       printBanner();
       const svcsToOpen = targets.length > 0 ? targets : undefined;
+      if (repoMode) {
+        const opened = await manager.openRepository(svcsToOpen);
+        if (!opened.length) console.log(yellow("No GitHub repositories available to open."));
+        for (const item of opened) console.log(`  ${bold(item.name)}: ${cyan(underline(item.url))}`);
+        break;
+      }
       const opened = await manager.openDashboard(svcsToOpen);
 
       if (opened.length === 0) {
@@ -290,13 +312,16 @@ export async function main() {
     case "start":
     case "up": {
       await checkForUpdates();
-      printBanner();
+      if (!jsonOutput) printBanner();
       const svcsToStart = targets.length > 0 ? targets : Object.keys(manager.readState().services);
-      console.log(cyan(`Starting service(s): ${svcsToStart.join(", ")}...\n`));
+      if (!jsonOutput) console.log(cyan(`Starting service(s): ${svcsToStart.join(", ")}...\n`));
+      const results = [];
 
       for (const id of svcsToStart) {
-        process.stdout.write(`  Launching ${bold(id)}... `);
+        if (!jsonOutput) process.stdout.write(`  Launching ${bold(id)}... `);
         const res = await manager.startService(id);
+        results.push({ id, ...res });
+        if (jsonOutput) continue;
         if (res.success) {
           if (res.alreadyRunning) {
             console.log(yellow(`already running (PID: ${res.pid})`));
@@ -306,8 +331,9 @@ export async function main() {
         } else {
           console.log(red(`failed: ${res.message}`));
         }
+        printCodexConfig(res);
       }
-      console.log("");
+      console.log(jsonOutput ? JSON.stringify(results, null, 2) : "");
       break;
     }
 
@@ -331,20 +357,24 @@ export async function main() {
     }
 
     case "restart": {
-      printBanner();
+      if (!jsonOutput) printBanner();
       const svcsToRestart = targets.length > 0 ? targets : Object.keys(manager.readState().services);
-      console.log(cyan(`Restarting service(s): ${svcsToRestart.join(", ")}...\n`));
+      if (!jsonOutput) console.log(cyan(`Restarting service(s): ${svcsToRestart.join(", ")}...\n`));
+      const results = [];
 
       for (const id of svcsToRestart) {
-        process.stdout.write(`  Restarting ${bold(id)}... `);
+        if (!jsonOutput) process.stdout.write(`  Restarting ${bold(id)}... `);
         const res = await manager.restartService(id);
+        results.push({ id, ...res });
+        if (jsonOutput) continue;
         if (res.success) {
           console.log(green(`started (PID: ${res.pid})`));
         } else {
           console.log(red(`failed: ${res.message}`));
         }
+        printCodexConfig(res);
       }
-      console.log("");
+      console.log(jsonOutput ? JSON.stringify(results, null, 2) : "");
       break;
     }
 

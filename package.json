@@ -13,6 +13,8 @@
     "bin",
     "src",
     "scripts/build.js",
+    "scripts/bench-proxy.js",
+    "docs/benchmark.md",
     "README.md",
     "LICENSE",
     "ARCHITECTURE.md",
@@ -35,7 +37,10 @@
   "scripts": {
     "start": "node ./bin/cli.js",
     "dev": "node ./bin/cli.js",
-    "test": "bun test test/aih.test.js test/metrics.test.js test/discovery.test.js test/tui-pipeline.test.js test/tui-versions.test.js test/versions.test.js && node --test test/proxy.test.js",
+    "test": "bun test test/aih.test.js test/metrics.test.js test/discovery.test.js test/tui-pipeline.test.js test/tui-versions.test.js test/versions.test.js test/repositories.test.js && node --test test/proxy.test.js test/codex-config.test.js test/codex-routing.test.js test/codex-manager.test.js test/benchmark-live.test.js test/benchmark-measurement.test.js test/benchmark-quality.test.js test/benchmark-report.test.js test/benchmark-runner.test.js",
+    "bench:proxy": "node scripts/bench-proxy.js",
+    "bench:models": "node scripts/bench-proxy.js --compare-models gpt-6-astra,anthropic/claude-fable-5-1 --formats responses",
+    "test:benchmark": "node --test test/benchmark-live.test.js test/benchmark-measurement.test.js test/benchmark-quality.test.js test/benchmark-report.test.js test/benchmark-runner.test.js",
     "build": "bun run scripts/build.js",
     "install-bin": "bun run scripts/install-bin.js"
   },
@@ -58,6 +63,7 @@
   "dependencies": {
     "gpt-tokenizer": "3.4.0",
     "pxpipe-proxy": "0.13.2",
+    "toml-eslint-parser": "1.0.3",
     "ws": "^8.21.3"
   }
 }

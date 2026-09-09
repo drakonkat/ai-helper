@@ -3,7 +3,8 @@ import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { normalizeProxyOptions } from "./proxy.js";
-import { SERVICES, SERVICE_IDS } from "./config.js";
+import { SERVICES, SERVICE_IDS, APP_REPOSITORY_URL } from "./config.js";
+import { configureCodexForProxy } from "./codex-routing.js";
 import { ensureDir, getAihDir, getLogsDir, getServiceLogPath, getStateFilePath } from "./utils/path.js";
 import {
   isPidRunning,
@@ -178,6 +179,7 @@ export class ServiceManager {
         uptime: svcState.status === "running" ? formatUptime(svcState.startedAt) : "-",
         url,
         dashboardUrl: id === "proxy" || url === "-" ? null : url,
+        repositoryUrl: id === "proxy" ? APP_REPOSITORY_URL : def.repositoryUrl || null,
         logPath,
         logSize,
       };
@@ -202,6 +204,28 @@ export class ServiceManager {
     return opened;
   }
 
+  /** Repository metadata is static; opening it does not require process discovery. */
+  async openRepository(targetServices) {
+    const targets = targetServices?.length ? targetServices : Object.keys(this.readState().services);
+    const opened = [];
+    for (const id of targets) {
+      const url = id === "proxy" ? APP_REPOSITORY_URL : SERVICES[id]?.repositoryUrl;
+      if (!url) continue;
+      openBrowser(url);
+      opened.push({ id, name: SERVICES[id]?.name || id, url });
+    }
+    return opened;
+  }
+
+  async configureCodexProxy(options = {}) {
+    try {
+      return await configureCodexForProxy(this.loadState(), { ...options, readState: () => this.loadState() });
+    } catch {
+      // Config I/O must not tear down a proxy that has already reported ready.
+      return { status: "warning", message: "Service started, but Codex configuration could not be updated safely." };
+    }
+  }
+
   /**
    * Starts a single service by ID.
    */
@@ -222,6 +246,7 @@ export class ServiceManager {
         pid: current.pid,
         alreadyRunning: true,
         url: current.url || def.defaultUrl,
+        ...(serviceId === "ocx" ? { codexConfig: await this.configureCodexProxy({ waitForOcx: true }) } : {}),
       };
     }
 
@@ -262,6 +287,7 @@ export class ServiceManager {
       message: `Service '${serviceId}' started successfully (PID: ${updatedSvc.pid})`,
       pid: updatedSvc.pid,
       url: updatedSvc.url || def.defaultUrl,
+      ...(serviceId === "ocx" ? { codexConfig: await this.configureCodexProxy({ waitForOcx: true }) } : {}),
     };
   }
 
@@ -273,7 +299,8 @@ export class ServiceManager {
       if (JSON.stringify(config) !== JSON.stringify(current.proxyOptions)) {
         throw new Error("Proxy is already running with different options; use 'aih restart proxy <upstream> [options]'");
       }
-      return { success: true, alreadyRunning: true, pid: current.pid, url: current.url };
+      return { success: true, alreadyRunning: true, pid: current.pid, url: current.url,
+        codexConfig: await this.configureCodexProxy() };
     }
     ensureDir(getLogsDir());
     const compiled = typeof Bun !== "undefined" && /^(?:\/\$bunfs\/|[A-Z]:\/~BUN\/)/i.test(Bun.main);
@@ -326,7 +353,7 @@ export class ServiceManager {
         url: ready.url, proxyOptions: config,
       };
       this.saveState(updated);
-      return { success: true, pid: child.pid, url: ready.url };
+      return { success: true, pid: child.pid, url: ready.url, codexConfig: await this.configureCodexProxy() };
     } catch (error) {
       if (child.pid) await killProcessTree(child.pid);
       throw error;

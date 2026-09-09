@@ -471,7 +471,11 @@ test("CLI backgrounds, reports readiness, saves options, restarts and stops only
   const home = join(dir, ".aih");
   const executable = process.env.AIH_TEST_BINARY || process.execPath;
   const entry = process.env.AIH_TEST_BINARY ? [] : [resolve("bin/cli.js")];
-  const cli = (...args) => exec(executable, [...entry, ...args], { env: { ...process.env, AIH_HOME: home }, timeout: 20000, windowsHide: true });
+  const codexHome = join(dir, ".codex");
+  const configPath = join(codexHome, "config.toml");
+  const cli = (...args) => exec(executable, [...entry, ...args], {
+    env: { ...process.env, AIH_HOME: home, CODEX_HOME: codexHome, AIH_CODEX_AUTOCONFIG: "1" }, timeout: 20000, windowsHide: true,
+  });
   const interceptor = join(dir, "cli hooks.mjs");
   await writeFile(interceptor, "export function onWebSocketMessage(ctx) { if (ctx.direction === 'request') ctx.body = ctx.body.toString() + '-hook'; }\n");
   const { url, upstream, proxy: occupied } = await fixture(t, (req, res) => {
@@ -487,6 +491,9 @@ test("CLI backgrounds, reports readiness, saves options, restarts and stops only
   });
   const started = JSON.parse((await cli("start", "proxy", url, "--listen", "http://127.0.0.1:0", "--interceptor", interceptor, "--preset", "pxpipe", "--models", "gpt-5.5*", "--json")).stdout);
   assert.equal(started.success, true);
+  assert.equal(started.codexConfig.status, "updated");
+  assert.match(await readFile(configPath, "utf8"), new RegExp(`openai_base_url = "${started.url}/v1"`));
+  assert.match(await readFile(configPath, "utf8"), new RegExp(`experimental_realtime_ws_base_url = "${started.url}/v1"`));
   assert.equal(JSON.parse((await cli("stats", "proxy", "--json")).stdout), null);
   assert.equal((await request(started.url)).body.toString(), "alive");
   const wireBody = zlib.zstdCompressSync ? zlib.zstdCompressSync(Buffer.from(JSON.stringify(aiBody()))) : JSON.stringify(aiBody());
@@ -510,6 +517,8 @@ test("CLI backgrounds, reports readiness, saves options, restarts and stops only
   assert.equal(status.pid, started.pid);
   assert.equal(status.status, "running");
   assert.equal(status.dashboardUrl, null);
+  assert.equal(status.repositoryUrl, "https://github.com/drakonkat/ai-helper");
+  assert.match((await cli("status", "proxy")).stdout, /REPO[\s\S]*github.com\/drakonkat\/ai-helper/);
   assert.match((await cli("open", "proxy")).stdout, /No dashboard URLs/);
   const statuses = JSON.parse((await cli("status", "--ui", "--json")).stdout);
   assert.equal(statuses.length, 5);
@@ -517,6 +526,7 @@ test("CLI backgrounds, reports readiness, saves options, restarts and stops only
   assert.match((await cli("logs", "proxy")).stdout, /Listening on/);
   const restarted = JSON.parse((await cli("restart", "proxy", "--json")).stdout);
   assert.notEqual(restarted.pid, started.pid);
+  assert.ok((await readFile(configPath, "utf8")).includes(`openai_base_url = "${restarted.url}/v1"`));
   assert.equal((await request(restarted.url)).body.toString(), "alive");
   assert.equal(JSON.parse((await cli("stats", "proxy", "--json")).stdout).estimatedSavedTokens, stats.estimatedSavedTokens);
   await assert.rejects(cli("restart", "proxy", "file:///invalid"));
@@ -527,7 +537,9 @@ test("CLI backgrounds, reports readiness, saves options, restarts and stops only
   assert.equal(state.services.proxy.proxyOptions.upstream, url + "/");
   assert.equal(state.services.proxy.proxyOptions.preset, "pxpipe");
   assert.equal(state.services.proxy.proxyOptions.models, "gpt-5.5*");
+  const stoppedConfig = await readFile(configPath, "utf8");
   await assert.rejects(cli("start", "proxy", "--listen", occupied.url), /EADDRINUSE/);
+  assert.equal(await readFile(configPath, "utf8"), stoppedConfig);
   assert.equal(JSON.parse(await readFile(join(home, "state.json"), "utf8")).services.proxy.status, "stopped");
   assert.equal((await request(url)).status, 200);
 });

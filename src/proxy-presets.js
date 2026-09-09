@@ -135,7 +135,9 @@ export async function createPresetHooks(config, onStats = () => {}) {
     const stages = [];
     const report = error => {
       // Observability must never interrupt proxy traffic; no request bodies are passed to the recorder.
-      try { onStats({ model, preset: config.preset, transport: websocket ? "WS" : "HTTP", changed, stages, error }); } catch {}
+      // Optional correlation only; never pass headers or bodies to the recorder.
+      const requestId = typeof context.headers?.["x-request-id"] === "string" ? context.headers["x-request-id"].slice(0, 128) : undefined;
+      try { onStats({ model, preset: config.preset, transport: websocket ? "WS" : "HTTP", changed, stages, error, ...(requestId ? { requestId } : {}) }); } catch {}
     };
     try {
       if (config.preset.startsWith("headroom")) {

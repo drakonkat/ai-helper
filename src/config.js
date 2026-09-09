@@ -13,6 +13,7 @@ export const SERVICES = {
     id: "pxpipe",
     name: "pxpipe",
     command: "npx pxpipe-proxy",
+    repositoryUrl: "https://github.com/teamchong/pxpipe",
     description: "AI LLM / MCP reverse proxy bridge (pxpipe-proxy)",
     defaultPort: 47821,
     defaultUrl: "http://localhost:47821",
@@ -23,6 +24,7 @@ export const SERVICES = {
     name: "ocx",
     command: "ocx start",
     stopCommand: "ocx stop",
+    repositoryUrl: "https://github.com/lidge-jun/opencodex",
     description: "OpenCode Interpreter daemon service (ocx start)",
     defaultPort: 10100,
     defaultUrl: "http://localhost:10100",
@@ -33,6 +35,7 @@ export const SERVICES = {
     name: "agentmemory",
     command: "npx @agentmemory/agentmemory",
     stopCommand: "npx @agentmemory/agentmemory stop --force",
+    repositoryUrl: "https://github.com/rohitg00/agentmemory",
     description: "Long-term persistent agent memory service (@agentmemory/agentmemory)",
    defaultPort: 3113,
    defaultUrl: "http://localhost:3113",
@@ -42,6 +45,7 @@ export const SERVICES = {
     id: "headroom",
     name: "headroom",
     command: "headroom proxy",
+    repositoryUrl: "https://github.com/headroomlabs-ai/headroom",
     description: "Context optimization & LLM proxy (headroom proxy)",
     defaultPort: 8787,
     defaultUrl: "http://localhost:8787/dashboard",
@@ -55,3 +59,4 @@ export const APP_NAME = "ai-helper";
 export const CLI_NAME = "aih";
 export const VERSION = packageInfo.version;
 export const PACKAGE_NAME = packageInfo.name;
+export const APP_REPOSITORY_URL = packageInfo.repository.url.replace(/^git\+/, "").replace(/\.git$/, "");

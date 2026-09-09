@@ -4,6 +4,14 @@ All notable changes to **`ai-helper` (`aih`)** are documented in this file.
 
 ---
 
+## [Unreleased]
+
+### Added
+- GitHub `REPO` column in plain status and the live dashboard, `repositoryUrl` in JSON, and repository opening with `g` or `aih open <service> --repo`.
+- Automatic Codex proxy URL configuration on managed proxy start/restart and ocx start/restart with an active proxy, including actual bound ports, ocx readiness checks, TOML-preserving edits, first-write backups, and `AIH_CODEX_AUTOCONFIG=0` opt-out.
+
+---
+
 ## [1.1.1] - 2026-08-27
 
 ### Updates
