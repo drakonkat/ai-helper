@@ -75,6 +75,7 @@ ${bold("EXAMPLES:")}
   ${dim("$")} ${cyan(CLI_NAME)} open                ${dim("# Opens all running dashboards in browser")}
   ${dim("$")} ${cyan(CLI_NAME)} open agentmemory    ${dim("# Opens agentmemory dashboard")}
   ${dim("$")} ${cyan(CLI_NAME)} start
+  ${dim("$")} ${cyan(CLI_NAME)} start --models "gpt-6-astra,anthropic/claude-fable*"
   ${dim("$")} ${cyan(CLI_NAME)} stop pxpipe
   ${dim("$")} ${cyan(CLI_NAME)} restart ocx
   ${dim("$")} ${cyan(CLI_NAME)} ocx update
@@ -191,6 +192,7 @@ export async function main() {
   let uiMode = false;
   let repoMode = false;
   let lines = 50;
+  let models;
   const positionalArgs = [];
 
   for (let i = 0; i < rawArgs.length; i++) {
@@ -213,6 +215,13 @@ export async function main() {
       lines = parseInt(arg.slice(3), 10) || 50;
     } else if (arg.startsWith("--lines=")) {
       lines = parseInt(arg.slice(8), 10) || 50;
+    } else if (arg === "--models") {
+      const next = rawArgs[i + 1];
+      if (next === undefined || next.startsWith("-")) throw new Error("--models requires a value (use --models= for an empty list)");
+      models = next;
+      i++;
+    } else if (arg.startsWith("--models=")) {
+      models = arg.slice(9);
     } else if (arg === "-h" || arg === "--help" || arg === "help") {
       printHelp();
       return;
@@ -373,8 +382,8 @@ export async function main() {
           upstream: "http://127.0.0.1:10100/",
           listen: "http://127.0.0.1:10102",
           preset: "pxpipe",
-          models: "gpt-6-astra,google-antigravity/gemini-3.8*,anthropic/claude-fable*",
-        } : undefined);
+          models: models ?? "gpt-6-astra,google-antigravity/gemini-3.8*,anthropic/claude-fable*",
+        } : id === "proxy" && models !== undefined ? { models } : undefined);
         results.push({ id, ...res });
         if (jsonOutput) continue;
         if (res.success) {

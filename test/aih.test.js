@@ -128,6 +128,11 @@ describe("Service start CLI", () => {
       for (const command of ["start", "up"]) {
         for (const [args, expected] of [
           [[], [["ocx", undefined], ["agentmemory", undefined], ["proxy", defaultProxy]]],
+          [["--models", "custom/*"], [["ocx", undefined], ["agentmemory", undefined], ["proxy", { ...defaultProxy, models: "custom/*" }]]],
+          [["--models=custom/*"], [["ocx", undefined], ["agentmemory", undefined], ["proxy", { ...defaultProxy, models: "custom/*" }]]],
+          [["--models", ""], [["ocx", undefined], ["agentmemory", undefined], ["proxy", { ...defaultProxy, models: "" }]]],
+          [["--models="], [["ocx", undefined], ["agentmemory", undefined], ["proxy", { ...defaultProxy, models: "" }]]],
+          [["ocx", "proxy", "--models", "custom/*"], [["ocx", undefined], ["proxy", { models: "custom/*" }]]],
           [["pxpipe", "headroom"], [["pxpipe", undefined], ["headroom", undefined]]],
           [["proxy", customProxy.upstream, "--listen", customProxy.listen, "--preset", customProxy.preset, "--models", customProxy.models], [["proxy", customProxy]]],
         ]) {
@@ -135,6 +140,12 @@ describe("Service start CLI", () => {
           process.argv = ["node", "aih", command, ...args, "--json"];
           await main();
           expect(calls).toEqual(expected);
+        }
+        for (const args of [["--models"], ["--models", "--json"]]) {
+          calls.length = 0;
+          process.argv = ["node", "aih", command, ...args];
+          await expect(main()).rejects.toThrow("--models");
+          expect(calls).toEqual([]);
         }
       }
     } finally {

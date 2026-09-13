@@ -243,6 +243,13 @@ then the built-in proxy with these options:
 aih start proxy http://127.0.0.1:10100/ --listen http://127.0.0.1:10102 --preset pxpipe --models "gpt-6-astra,google-antigravity/gemini-3.8*,anthropic/claude-fable*"
 ```
 
+Pass `--models` to `aih start` (or `aih up`) to override the proxy's model list:
+
+```bash
+aih start --models "gpt-6-astra,anthropic/claude-fable*"
+aih start --models=  # Use pxpipe's default model selection
+```
+
 If the proxy is already running with different options, use `aih restart proxy`
 with the options above to apply them.
 
