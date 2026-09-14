@@ -21,6 +21,7 @@
 - [Key Features](#-key-features)
 - [CLI Reference](#-cli-reference)
 - [HTTP / WebSocket Proxy](#http--websocket-proxy)
+  - [Proxy option values](#proxy-option-values)
   - [Start a compression pipeline](#start-a-compression-pipeline)
   - [Select models](#select-models)
   - [Proxy token savings](#proxy-token-savings)
@@ -111,6 +112,31 @@ bun add -g @drakonkat/ai-helper
 
 ## 💻 CLI Reference
 
+Run `aih --help` for the command summary and examples. Replace `<values>` with
+your own values; brackets below mark optional arguments. Quote values containing
+spaces, such as `--interceptor "./my hooks/interceptor.mjs"`.
+
+| Command syntax | Example |
+| --- | --- |
+| `status [services...] [--json] [--ui]` | `aih status ocx proxy --json`; `aih status --ui` |
+| `start [services...] [--models <list>] [--json]` | `aih start --models "gpt-6-astra,anthropic/claude-fable*"` |
+| `start proxy [upstream] [proxy options] [--json]` | `aih start proxy http://127.0.0.1:10100/ --listen http://127.0.0.1:10102 --preset pxpipe` |
+| `stop [services...]` | `aih stop ocx agentmemory` |
+| `restart [services...] [--json]` | `aih restart ocx agentmemory --json` |
+| `restart proxy [upstream] [proxy options] [--json]` | `aih restart proxy --models="gpt-6-astra,anthropic/claude-fable*"` |
+| `update [--json]` | `aih update` (update aih itself from npm) |
+| `update <services...> [--json]` | `aih update ocx agentmemory --json`; `aih ocx update` |
+| `open [services...] [--repo]` | `aih open agentmemory`; `aih open proxy --repo` |
+| `logs <service> [-n <lines>] [-f]` | `aih logs proxy --lines=100 --follow` |
+| `stats proxy [--json]` | `aih stats proxy --json` |
+| `install` | `aih install` (build/install the standalone binary; requires Bun) |
+| `version`, `help` | `aih --version`; `aih --help` |
+
+Aliases: `ps`, `ls`, `list` for `status`; `up` for `start`; `down` for `stop`;
+`dashboard`, `dash` for `open`; `log` for `logs`. `-ui` also enables the status
+dashboard, `--lines`/`--follow` are the long log options, and `-v`/`-h` show
+version/help. Proxy URL and option values are detailed [below](#proxy-option-values).
+
 ### 1. Status Overview
 
 ```bash
@@ -123,7 +149,7 @@ aih
 
 *Output:*
 ```text
-ai-helper v1.1.1 — Background AI Ecosystem Service Manager
+ai-helper v1.2.6 — Background AI Ecosystem Service Manager
 
 SERVICE       STATUS        PID   UPTIME   ADDRESS                  REPO                                       COMMAND
 ───────────   ─────────   ─────   ──────   ──────────────────────   ─────────────────────────────────────────  ────────────────────────────
@@ -177,13 +203,32 @@ Narrow terminals keep space for the newest events and service controls.
 
 ---
 
+### Update aih
+
+```bash
+aih update                         # update aih itself to the latest npm release
+aih update --json                  # JSON result array, exit code 1 on failure
+aih --version                      # verify the installed version
+```
+
+Without service targets, `aih update` runs
+`npm install --global @drakonkat/ai-helper@latest --no-audit --no-fund`.
+It does not update or restart managed services. npm must be on PATH and its
+global installation directory writable. Installer output is captured in
+`~/.aih/logs/aih.log` (or under `AIH_HOME`), with failure details in the result.
+
+This updates the global npm installation, not a source checkout, local dependency,
+or standalone executable. Rebuild standalone executables separately and ensure
+your shell resolves `aih` to the installation you intend to use. Restart a running
+built-in proxy with `aih restart proxy` to load the updated code.
+
 ### Update Managed Services
 
 ```bash
 aih ocx update                     # update OpenCodex to the latest available release
 aih update ocx                     # equivalent command-first form
 aih update ocx agentmemory         # update selected services
-aih update                         # pxpipe, ocx, agentmemory, headroom only
+aih update pxpipe ocx agentmemory headroom  # all managed services, not aih itself
 aih update ocx --json              # JSON result array, exit code 1 on any failure
 ```
 
@@ -192,8 +237,8 @@ installation is left unchanged. Running services are restarted after an update;
 stopped services are not started. If installation fails after stopping a running
 service, aih attempts to start it again and reports any recovery failure.
 Unknown/custom service targets are rejected before any selected service is
-changed. The built-in `proxy` is part of ai-helper itself and is excluded from
-`aih update`: update the ai-helper package or rebuild the standalone executable
+changed. The built-in `proxy` is part of ai-helper itself and cannot be updated
+as a service: use `aih update` without targets or rebuild the standalone executable
 instead. The proxy's bundled pxpipe library is likewise updated with ai-helper,
 not by updating the separate `pxpipe` service.
 
@@ -247,11 +292,26 @@ Pass `--models` to `aih start` (or `aih up`) to override the proxy's model list:
 
 ```bash
 aih start --models "gpt-6-astra,anthropic/claude-fable*"
+aih up --models="gpt-6-astra,anthropic/claude-fable*"  # Equivalent value syntax
 aih start --models=  # Use pxpipe's default model selection
 ```
 
+The value is passed only to the built-in proxy; `ocx` and `agentmemory` start
+normally. `--models=` passes an empty string; `--models ""` also works when your
+shell preserves empty arguments. A bare `--models` without a value is an error.
+See [Select models](#select-models) for matching and compression behavior.
+
+The no-target `start`/`up` commands supply the upstream, listener and preset above
+on every invocation, plus that model list unless `--models` overrides it.
+Other saved proxy options are retained.
+A first `aih start proxy <upstream>` instead uses listener `http://127.0.0.1:10101`
+and preset `none` unless specified. After configuration, `aih start proxy` reuses
+saved options, including the upstream. Use the dedicated `start proxy` /
+`restart proxy` forms for `--listen`, `--preset` and other proxy options.
+
 If the proxy is already running with different options, use `aih restart proxy`
-with the options above to apply them.
+to apply changes, for example `aih restart proxy --models "gpt-6-astra"`.
+Omitted proxy options retain their saved values.
 
 `aih start` (also `aih up` and starts targeting individual services) checks npm's
 `latest` release of `@drakonkat/ai-helper`. If a newer version exists, it prints
@@ -296,6 +356,9 @@ aih logs agentmemory -n 100
 
 # Stream logs in real-time (like tail -f)
 aih logs ocx -f
+
+# Long options and equals syntax
+aih logs proxy --lines=100 --follow
 ```
 
 ---
@@ -304,6 +367,26 @@ aih logs ocx -f
 
 Requires **Node.js 20.19+** (also on PATH when using the Bun CLI or compiled executable).
 Use **Node.js 24+ for Codex**, whose Zstandard request compression needs Node.js 22.15+.
+
+### Proxy option values
+
+Use `aih start proxy <upstream> [options]` on first configuration, or
+`aih restart proxy [upstream] [options]` to change it. The upstream is an HTTP(S)
+destination, for example `http://127.0.0.1:10100/`. Unspecified values reuse saved
+options; defaults in this table apply when no saved value exists.
+
+| Option and example value | Meaning / default |
+| --- | --- |
+| `--listen http://127.0.0.1:10102` | Loopback HTTP listener; default `http://127.0.0.1:10101`. |
+| `--preset headroom-pxpipe` | Pipeline; default `none`. Choices: `none`, `pxpipe`, `headroom`, `rtk`, `headroom-pxpipe`, `rtk-pxpipe`, `rtk-headroom-pxpipe`. |
+| `--models "gpt-6-astra,anthropic/claude-fable*"` | pxpipe model selection; `--models=` restores pxpipe's defaults. Also accepted by generic `start`/`up`. |
+| `--interceptor "./my hooks/interceptor.mjs"` | Custom JavaScript hooks, loaded at startup; default none. `--interceptor=` clears the saved path. |
+| `--headroom-url http://127.0.0.1:8787` | Headroom compression service; default shown. |
+| `--rtk-filter grep` | Fixed RTK filter for matching tool output; default auto-detection. `--rtk-filter=` resets it. |
+| `--max-body-bytes 67108864` | Buffered HTTP / WebSocket limit in bytes; default 64 MiB. |
+| `--json` | Emit the proxy start/restart result as JSON. |
+
+String options accept both `--option value` and `--option=value`.
 
 ### Start a compression pipeline
 
@@ -420,9 +503,10 @@ aih restart proxy --models "gpt-5.5,gpt-5.6*,gpt-6-astra,google-antigravity/gemi
 aih restart proxy --models=
 ```
 
-An explicit list **replaces** the saved list. Only a trailing `*` is supported;
-use the exact IDs from your client's model catalog. Selecting a model allows
-compression but does not force it: pxpipe can leave short or unprofitable
+An explicit list **replaces** the saved list. A trailing `*` matches a prefix:
+`anthropic/claude-fable*` includes `anthropic/claude-fable-5-1`. Other wildcard
+positions are unsupported; use the exact IDs from your client's model catalog.
+Selecting a model allows compression but does not force it: pxpipe can leave short or unprofitable
 requests unchanged. The upstream must support the selected model/API format.
 
 ### Transport and lifecycle
@@ -451,7 +535,8 @@ listening and the interceptor has loaded. One proxy is managed at a time;
 `restart proxy <upstream> [options]` changes its configuration. Omitted options
 reuse the last successful configuration, stored in `~/.aih/state.json`.
 Use `--interceptor=` to clear an interceptor. Once configured, the proxy also
-participates in unqualified `start`, `stop`, `restart` and `status` commands.
+participates in unqualified `stop`, `restart` and `status` commands. Unqualified
+`start` applies the [default startup options](#3-start-services) described above.
 
 HTTP methods, paths, queries, authentication headers, status codes, cookies and
 payload bytes are forwarded. SSE stays streaming, with backpressure and upstream
@@ -637,7 +722,8 @@ Requests are never retried automatically.
 
 ## 🤖 Programmatic JSON API
 
-For AI agents, scripts, and CI/CD pipelines, use the `--json` flag:
+For AI agents, scripts, and CI/CD pipelines, `status`, `start`/`up`, `restart`,
+`update` and `stats proxy` support `--json`:
 
 ```bash
 aih status --json

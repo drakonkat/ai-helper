@@ -84,6 +84,7 @@ describe("Update check", () => {
     } });
     expect(messages.length).toBe(1);
     expect(messages[0]).toContain(`${VERSION} -> 999.0.0`);
+    expect(messages[0]).toContain("Run: aih update");
     expect(messages[0]).toContain(`npm install -g ${PACKAGE_NAME}@latest`);
     for (const result of [
       { ok: false }, { ok: true, json: async () => ({ version: VERSION }) },
@@ -157,27 +158,32 @@ describe("Service start CLI", () => {
   });
 });
 
-describe("Managed service update CLI", () => {
-  async function runUpdate(args, update = async id => ({ success: true, message: `${id} updated`, version: "2.49.0" })) {
-    const original = { argv: process.argv, log: console.log, error: console.error, exitCode: process.exitCode, update: manager.updateService };
+describe("Self and managed service update CLI", () => {
+  async function runUpdate(args,
+    update = async id => ({ success: true, message: `${id} updated`, version: "2.49.0" }),
+    selfUpdate = async () => ({ success: true, package: PACKAGE_NAME, message: "aih updated" })) {
+    const original = { argv: process.argv, log: console.log, error: console.error, write: process.stdout.write, exitCode: process.exitCode, update: manager.updateService };
     const stdout = [];
     const stderr = [];
     const calls = [];
+    let selfCalls = 0;
     try {
       console.log = message => stdout.push(String(message));
       console.error = message => stderr.push(String(message));
+      process.stdout.write = message => { stdout.push(String(message)); return true; };
       manager.updateService = async id => { calls.push(id); return update(id); };
       process.argv = ["node", "aih", "--help"];
       const { main } = await import("../src/index.js");
       stdout.length = 0;
       process.exitCode = 0;
       process.argv = ["node", "aih", ...args];
-      await main();
-      return { calls, stdout, stderr, exitCode: process.exitCode };
+      await main({ updateSelfImpl: async () => { selfCalls++; return selfUpdate(); } });
+      return { calls, selfCalls, stdout, stderr, exitCode: process.exitCode };
     } finally {
       process.argv = original.argv;
       console.log = original.log;
       console.error = original.error;
+      process.stdout.write = original.write;
       process.exitCode = original.exitCode;
       manager.updateService = original.update;
     }
@@ -187,6 +193,7 @@ describe("Managed service update CLI", () => {
     for (const args of [["ocx", "update", "--json"], ["--json", "update", "ocx"]]) {
       const result = await runUpdate(args);
       expect(result.calls).toEqual(["ocx"]);
+      expect(result.selfCalls).toBe(0);
       expect(result.stdout).toHaveLength(1);
       expect(JSON.parse(result.stdout[0])).toEqual([{ id: "ocx", success: true, message: "ocx updated", version: "2.49.0" }]);
       expect(result.stderr).toEqual([]);
@@ -194,9 +201,56 @@ describe("Managed service update CLI", () => {
     }
   });
 
-  it("defaults to standard services only and deduplicates explicit targets", async () => {
-    const all = await runUpdate(["update", "--json"]);
+  it("updates only aih by default and keeps JSON clean", async () => {
+    for (const args of [["update", "--json"], ["--json", "update"]]) {
+      const result = await runUpdate(args);
+      expect(result.calls).toEqual([]);
+      expect(result.selfCalls).toBe(1);
+      expect(result.stdout).toHaveLength(1);
+      expect(JSON.parse(result.stdout[0])).toEqual([{ id: "aih", success: true, package: PACKAGE_NAME, message: "aih updated" }]);
+      expect(result.stderr).toEqual([]);
+      expect(result.exitCode).toBe(0);
+    }
+  });
+
+  it("reports self-update success and failures in text and JSON", async () => {
+    const success = await runUpdate(["update"]);
+    expect(success.calls).toEqual([]);
+    expect(success.selfCalls).toBe(1);
+    expect(success.stdout.join("\n")).toContain("aih updated");
+    expect(success.exitCode).toBe(0);
+    for (const selfUpdate of [
+      async () => ({ success: false, exitCode: 7, message: "npm failed" }),
+      async () => { throw new Error("npm failed"); },
+    ]) {
+      for (const args of [["update"], ["update", "--json"]]) {
+        const result = await runUpdate(args, undefined, selfUpdate);
+        expect(result.calls).toEqual([]);
+        expect(result.selfCalls).toBe(1);
+        expect(result.exitCode).toBe(1);
+        expect(result.stdout.join("\n")).toContain("npm failed");
+        if (args.includes("--json")) {
+          expect(result.stdout).toHaveLength(1);
+          expect(JSON.parse(result.stdout[0])[0]).toMatchObject({ id: "aih", success: false, message: "npm failed" });
+          expect(result.stderr).toEqual([]);
+        }
+      }
+    }
+  });
+
+  it("does not install anything when showing update help or version", async () => {
+    for (const args of [["update", "--help"], ["update", "--version"]]) {
+      const result = await runUpdate(args);
+      expect(result.calls).toEqual([]);
+      expect(result.selfCalls).toBe(0);
+      expect(result.exitCode).toBe(0);
+    }
+  });
+
+  it("updates explicitly selected services and deduplicates targets", async () => {
+    const all = await runUpdate(["update", ...SERVICE_IDS, "--json"]);
     expect(all.calls).toEqual(SERVICE_IDS);
+    expect(all.selfCalls).toBe(0);
     expect(all.calls).not.toContain("proxy");
     const selected = await runUpdate(["update", "ocx", "agentmemory", "ocx", "--json"]);
     expect(selected.calls).toEqual(["ocx", "agentmemory"]);
@@ -208,9 +262,11 @@ describe("Managed service update CLI", () => {
       ["update", "ocx", "unknown"], ["update", "proxy"],
       ["ocx", "update", "agentmemory"], ["unknown", "update"],
       ["update", "--ocx"], ["update", "ocx", "--repo"],
+      ["update", "--repo"], ["update", "--models=ignored"],
     ]) {
       const result = await runUpdate([...args, "--json"]);
       expect(result.calls).toEqual([]);
+      expect(result.selfCalls).toBe(0);
       expect(result.exitCode).toBe(1);
       expect(result.stdout).toHaveLength(1);
       expect(JSON.parse(result.stdout[0]).every(r => r.success === false)).toBe(true);

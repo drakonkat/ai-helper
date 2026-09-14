@@ -3,9 +3,10 @@ import { EventEmitter } from "node:events";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
-import { SERVICES } from "../src/config.js";
+import { PACKAGE_NAME, SERVICES } from "../src/config.js";
 import { ServiceManager } from "../src/manager.js";
 import { installServiceUpdate, serviceStartCommand, serviceUpdateInvocation } from "../src/service-updates.js";
+import { updateSelf } from "../src/update.js";
 
 // Every lifecycle/registry/installer dependency is replaced: no real services,
 // processes, package managers, state files, or network requests are touched.
@@ -63,7 +64,7 @@ describe("service installer command allowlist", () => {
   });
 
   it("rejects proxy, unknown identifiers, inherited keys, and shell text before spawning", () => {
-    for (const id of ["proxy", "missing", "constructor", "__proto__", "ocx & whoami", "../ocx"]) {
+    for (const id of ["aih", "proxy", "missing", "constructor", "__proto__", "ocx & whoami", "../ocx"]) {
       expect(() => serviceUpdateInvocation(id)).toThrow("cannot be updated separately");
       expect(() => installServiceUpdate(id, { spawnImpl: () => { throw new Error("must not spawn"); } })).toThrow("cannot be updated separately");
     }
@@ -366,6 +367,75 @@ function fakeChild() {
   child.stderr = new EventEmitter();
   return child;
 }
+
+describe("aih self-update installer", () => {
+  for (const platform of ["linux", "darwin", "win32"]) {
+    it(`installs the fixed npm latest package and captures output on ${platform}`, async () => withLogHome(async home => {
+      const child = fakeChild();
+      let invocation;
+      let settled = false;
+      const pending = updateSelf({ platform, spawnImpl: (...args) => { invocation = args; return child; } });
+      pending.then(() => { settled = true; });
+      expect(invocation.slice(0, 2)).toEqual(platform === "win32"
+        ? ["cmd.exe", ["/d", "/s", "/c", `npm install --global ${PACKAGE_NAME}@latest --no-audit --no-fund`]]
+        : ["npm", ["install", "--global", `${PACKAGE_NAME}@latest`, "--no-audit", "--no-fund"]]);
+      expect(invocation[2]).toMatchObject({ windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: { CI: "1", npm_config_yes: "true", NO_COLOR: "1" } });
+      expect(invocation[2].shell).toBeUndefined();
+      child.stdout.emit("data", Buffer.from("added ai-helper\n"));
+      child.emit("exit", 0);
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      child.stderr.emit("data", "npm final diagnostics\n");
+      child.emit("close", 0, null);
+      const result = await pending;
+      expect(result).toMatchObject({ success: true, exitCode: 0, package: PACKAGE_NAME, logPath: join(home, "logs", "aih.log") });
+      expect(result.message).toContain(`Global npm installation of ${PACKAGE_NAME} updated to latest`);
+      expect(result.message).toContain("aih --version");
+      expect(result.message).toContain("standalone executables still require a rebuild");
+      expect(result.message).not.toContain("added ai-helper");
+      const log = readFileSync(result.logPath, "utf8");
+      expect(log).toContain(`npm install --global ${PACKAGE_NAME}@latest --no-audit --no-fund`);
+      expect(log).toContain("added ai-helper\nnpm final diagnostics\n");
+    }));
+  }
+
+  it("reports nonzero npm exit codes with bounded diagnostics and the full log", async () => withLogHome(async () => {
+    const child = fakeChild();
+    const pending = updateSelf({ spawnImpl: () => child });
+    const output = "start-of-npm-output\n" + "x".repeat(12000) + "\npermission denied";
+    child.stderr.emit("data", output);
+    child.emit("close", 9, null);
+    const result = await pending;
+    expect(result).toMatchObject({ success: false, exitCode: 9, package: PACKAGE_NAME });
+    expect(result.message).toContain("permission denied");
+    expect(result.message).not.toContain("start-of-npm-output");
+    expect(result.message.length).toBeLessThan(4100);
+    expect(readFileSync(result.logPath, "utf8")).toContain(output);
+  }));
+
+  it("handles a missing npm spawn exception without rejecting", async () => withLogHome(async home => {
+    expect(await updateSelf({ spawnImpl: () => { throw new Error("missing npm"); } }))
+      .toMatchObject({ success: false, exitCode: 1, package: PACKAGE_NAME, message: "missing npm", logPath: join(home, "logs", "aih.log") });
+  }));
+
+  it("keeps a missing npm child error even when close and late output follow", async () => withLogHome(async () => {
+    const child = fakeChild();
+    const pending = updateSelf({ spawnImpl: () => child });
+    child.emit("error", new Error("spawn npm ENOENT"));
+    child.stdout.emit("data", "late output");
+    child.emit("close", 0, null);
+    expect(await pending).toMatchObject({ success: false, exitCode: 1, package: PACKAGE_NAME, message: "Cannot update 'aih': spawn npm ENOENT" });
+  }));
+
+  it("reports signal termination and missing exit codes as failures", async () => withLogHome(async () => {
+    for (const [code, signal, message] of [[null, "SIGTERM", "Installer terminated by SIGTERM"], [0, "SIGINT", "Installer terminated by SIGINT"], [null, null, "Installer failed (1): no output"]]) {
+      const child = fakeChild();
+      const pending = updateSelf({ spawnImpl: () => child });
+      child.emit("close", code, signal);
+      expect(await pending).toMatchObject({ success: false, exitCode: 1, package: PACKAGE_NAME, message });
+    }
+  }));
+});
 
 describe("installer output capture", () => {
   it("logs both streams privately and waits for close rather than exit", async () => withLogHome(async home => {

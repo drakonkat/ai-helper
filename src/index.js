@@ -1,6 +1,6 @@
 import { APP_NAME, CLI_NAME, SERVICES, SERVICE_IDS, VERSION } from "./config.js";
 import { manager } from "./manager.js";
-import { checkForUpdates } from "./update.js";
+import { checkForUpdates, updateSelf } from "./update.js";
 import { readProxyStats, proxyStatsLines } from "./proxy-stats.js";
 import {
   badgeStatus,
@@ -23,46 +23,73 @@ import { parseArgs } from "node:util";
 function printHelp() {
   printBanner();
   console.log(`${bold("USAGE:")}
-  ${cyan(CLI_NAME)} ${yellow("<command>")} [options] [services...]
+  ${cyan(CLI_NAME)} ${yellow("<command>")} [services...] [options]
+  ${cyan(CLI_NAME)} start proxy <http(s)://upstream> [proxy-options]
+  ${cyan(CLI_NAME)} restart proxy [http(s)://upstream] [proxy-options]
 
 ${bold("COMMANDS:")}
-  ${yellow("status")}, ${yellow("ps")}              Show status, PID, uptime, and web dashboard URLs
-  ${yellow("status -ui")}              Interactive live dashboard: manage services and watch the AI pipeline
-  ${yellow("open")}, ${yellow("dash")} [services...]  Open web dashboard(s) directly in your default browser
-  ${yellow("start")}, ${yellow("up")} [services...]   Start ocx, agentmemory and the pxpipe proxy, or specified services
-  ${yellow("start proxy")} <upstream>     Start HTTP/SSE/WebSocket proxy (default: 127.0.0.1:10101)
+  ${yellow("status")}, ${yellow("ps")} [services...]   Show status, PID, uptime, dashboards and repositories
+  ${yellow("status -ui")}                 Interactive live dashboard: manage services and watch the AI pipeline
+  ${yellow("open")}, ${yellow("dash")} [services...]   Open web dashboard(s) directly in your default browser
+  ${yellow("start")}, ${yellow("up")} [services...]    Start ocx, agentmemory and the pxpipe proxy, or specified services
+  ${yellow("start proxy")} [upstream]      Start HTTP/SSE/WebSocket proxy; first start requires upstream
   ${yellow("stop")}, ${yellow("down")} [services...]   Stop all or specified services
-  ${yellow("restart")} [services...]      Restart all or specified services
-  ${yellow("update")} [services...]       Update managed services to the latest available version
-  ${yellow("<service> update")}          Update one service (for example: aih ocx update)
+  ${yellow("restart")} [services...]       Restart all or specified services
+  ${yellow("restart proxy")} [upstream]    Restart proxy, overriding only the supplied options
+  ${yellow("update")}                      Update aih itself to the latest npm release
+  ${yellow("update")} <services...>        Update the specified managed services
+  ${yellow("<service> update")}            Update one service (for example: aih ocx update)
   ${yellow("logs")} <service> [-n 50] [-f]  View or stream live logs for a service
-  ${yellow("stats proxy")} [--json]       Show proxy token savings estimates and recent requests
-  ${yellow("install")}                  Build standalone binary to ~/.local/bin and verify PATH
-  ${yellow("version")}, ${yellow("-v")}            Show version information
-  ${yellow("help")}, ${yellow("-h")}               Show this help message
+  ${yellow("stats proxy")} [--json]        Show proxy token savings estimates and recent requests
+  ${yellow("install")}                     Build standalone binary to ~/.local/bin and verify PATH
+  ${yellow("version")}, ${yellow("-v")}, ${yellow("--version")}     Show version information
+  ${yellow("help")}, ${yellow("-h")}, ${yellow("--help")}           Show this help message
+
+  Other aliases: status = ls/list; open = dashboard; logs = log.
+  Service lists use spaces: ocx agentmemory. Omitting the command shows status.
 
 ${bold("SERVICES MANAGED:")}
 ${SERVICE_IDS.map(id => {
   const svc = SERVICES[id];
   return `  ${cyan(svc.id.padEnd(14))} ${svc.description} ${dim(`(${svc.defaultUrl})`)}`;
 }).join("\n")}
+  ${cyan("proxy".padEnd(14))} Built-in HTTP/SSE/WebSocket proxy (no web dashboard)
 
 ${bold("OPTIONS:")}
-  ${gray("-n, --lines <num>")}     Number of log lines to show (default: 50)
-  ${gray("-f, --follow")}          Follow log output in real-time
-  ${gray("--json")}                Output results in JSON format
+  ${gray("-n, --lines <num>")}     Number of log lines to show (logs only; default: 50)
+  ${gray("-f, --follow")}          Follow log output in real-time (logs only)
+  ${gray("--json")}                JSON for status, start/up, restart, update and stats
   ${gray("--repo")}                Open GitHub repositories instead of dashboards (open only)
-  ${gray("--listen <http://host:port>")}  Proxy loopback listening address
-  ${gray("--interceptor <file.mjs>")}     Proxy JavaScript hooks (loaded at startup)
-  ${gray("--preset <name>")}              pxpipe | headroom | rtk | headroom-pxpipe | rtk-pxpipe | rtk-headroom-pxpipe | none
-  ${gray("--models <list>")}              pxpipe model allowlist, comma-separated (trailing * supported)
-  ${gray("--headroom-url <url>")}         Headroom service (default: http://127.0.0.1:8787)
-  ${gray("--rtk-filter <name>")}          Fixed rtk pipe filter (default: auto-detect)
-  ${gray("--max-body-bytes <num>")}       Proxy buffered request / WebSocket limit (default: 67108864)
   ${gray("-ui, --ui")}             Open the interactive dashboard (status only, requires a TTY)
+  ${gray("--models <list>")}       pxpipe model allowlist (start/up and start/up/restart proxy)
 
-${bold("SERVICE UPDATES:")}
-  'update' without targets updates pxpipe, ocx, agentmemory and headroom, not proxy.
+${bold("PROXY OPTIONS (start/up/restart proxy):")}
+  Put proxy immediately after the command, then the upstream URL and options.
+  ${gray("--listen <url>")}          HTTP loopback address (fresh default: http://127.0.0.1:10101)
+  ${gray("--interceptor <file.mjs>")} JavaScript hooks loaded at startup; quote paths with spaces
+  ${gray("--preset <name>")}         pxpipe | headroom | rtk | headroom-pxpipe | rtk-pxpipe |
+                            rtk-headroom-pxpipe | none (fresh default: none)
+  ${gray("--headroom-url <url>")}     Headroom service (default: http://127.0.0.1:8787)
+  ${gray("--rtk-filter <name>")}      Fixed rtk pipe filter; --rtk-filter= restores auto-detection
+  ${gray("--max-body-bytes <num>")}   Positive integer; buffered request / WebSocket limit
+                            (default: 67108864 bytes = 64 MiB)
+  Saved proxy options are reused when omitted. To change a running proxy, use restart proxy.
+
+${bold("START DEFAULTS AND MODEL VALUES:")}
+  Without service targets, start/up launches ocx, agentmemory, then proxy with:
+    upstream: http://127.0.0.1:10100/   listen: http://127.0.0.1:10102   preset: pxpipe
+    models: gpt-6-astra,google-antigravity/gemini-3.8*,anthropic/claude-fable*
+  --models on start/up replaces this list for the proxy only.
+  Model names are comma-separated; a trailing * matches a prefix (include provider names).
+  All models are forwarded; the list selects which ones pxpipe may process.
+  Value options accept --flag value or --flag=value. Quote lists, wildcards and spaced paths.
+  --models= restores pxpipe's default model selection; --models "" also works if the shell
+  preserves empty arguments. Bare --models without a value is an error.
+
+${bold("SELF AND SERVICE UPDATES:")}
+  'update' without targets updates aih's global npm installation, not managed services.
+  Standalone executables must be rebuilt; npm updates do not replace them.
+  To update all managed services: aih update pxpipe ocx agentmemory headroom
   In the live dashboard, select a service with up/down and press u to update it.
   Only running services are restarted; stopped services stay stopped.
 
@@ -70,17 +97,36 @@ ${bold("CODEX CONFIGURATION:")}
   Starting aih's proxy, or ocx with an active proxy, updates Codex's two base URLs.
   Respects CODEX_HOME; set AIH_CODEX_AUTOCONFIG=0 to leave config.toml untouched.
 
-${bold("EXAMPLES:")}
-  ${dim("$")} ${cyan("npx ai-helper")} status
-  ${dim("$")} ${cyan(CLI_NAME)} open                ${dim("# Opens all running dashboards in browser")}
-  ${dim("$")} ${cyan(CLI_NAME)} open agentmemory    ${dim("# Opens agentmemory dashboard")}
+${bold("EXAMPLES - STATUS, DASHBOARDS AND LOGS:")}
+  ${dim("$")} ${cyan("npx @drakonkat/ai-helper")} status
+  ${dim("$")} ${cyan(CLI_NAME)} status ocx proxy --json
+  ${dim("$")} ${cyan(CLI_NAME)} status --ui
+  ${dim("$")} ${cyan(CLI_NAME)} open agentmemory
+  ${dim("$")} ${cyan(CLI_NAME)} open ocx proxy --repo
+  ${dim("$")} ${cyan(CLI_NAME)} logs proxy --lines 100 --follow
+  ${dim("$")} ${cyan(CLI_NAME)} logs ocx -n=20
+  ${dim("$")} ${cyan(CLI_NAME)} stats proxy --json
+
+${bold("EXAMPLES - START, STOP AND UPDATE:")}
   ${dim("$")} ${cyan(CLI_NAME)} start
-  ${dim("$")} ${cyan(CLI_NAME)} start --models "gpt-6-astra,anthropic/claude-fable*"
-  ${dim("$")} ${cyan(CLI_NAME)} stop pxpipe
-  ${dim("$")} ${cyan(CLI_NAME)} restart ocx
+  ${dim("$")} ${cyan(CLI_NAME)} start --models "gpt-6-astra,anthropic/claude-fable*" --json
+  ${dim("$")} ${cyan(CLI_NAME)} up --models="google-antigravity/gemini-3.8*"
+  ${dim("$")} ${cyan(CLI_NAME)} start --models=   ${dim("# Use pxpipe's default model selection")}
+  ${dim("$")} ${cyan(CLI_NAME)} start ocx agentmemory
+  ${dim("$")} ${cyan(CLI_NAME)} stop ocx agentmemory proxy
+  ${dim("$")} ${cyan(CLI_NAME)} restart ocx --json
+  ${dim("$")} ${cyan(CLI_NAME)} update           ${dim("# Update aih itself from npm")}
   ${dim("$")} ${cyan(CLI_NAME)} ocx update
   ${dim("$")} ${cyan(CLI_NAME)} update ocx agentmemory --json
-  ${dim("$")} ${cyan(CLI_NAME)} logs pxpipe -f
+  ${dim("$")} ${cyan(CLI_NAME)} install          ${dim("# Build/install standalone binary; requires Bun")}
+
+${bold("EXAMPLES - PROXY CONFIGURATION:")}
+  ${dim("$")} ${cyan(CLI_NAME)} start proxy http://127.0.0.1:10100/ --listen http://127.0.0.1:10102 --preset pxpipe --models "gpt-6-astra,anthropic/claude-fable*"
+  ${dim("$")} ${cyan(CLI_NAME)} restart proxy --models "google-antigravity/gemini-3.8*"
+  ${dim("$")} ${cyan(CLI_NAME)} restart proxy --preset headroom-pxpipe --headroom-url http://127.0.0.1:8787
+  ${dim("$")} ${cyan(CLI_NAME)} restart proxy --preset rtk-pxpipe --rtk-filter git-diff
+  ${dim("$")} ${cyan(CLI_NAME)} restart proxy --models= --rtk-filter=
+  ${dim("$")} ${cyan(CLI_NAME)} restart proxy --interceptor "./my hooks/interceptor.mjs" --max-body-bytes=33554432
 `);
 }
 
@@ -156,7 +202,7 @@ async function runInstall() {
   }
 }
 
-export async function main() {
+export async function main({ updateSelfImpl = updateSelf } = {}) {
   const rawArgs = process.argv.slice(2);
 
   if (["start", "up", "restart"].includes(rawArgs[0]) && rawArgs[1] === "proxy" && !rawArgs.includes("--help") && !rawArgs.includes("-h")) {
@@ -239,7 +285,7 @@ export async function main() {
 
   switch (command) {
     case "update": {
-      const ids = [...new Set(targets.length ? targets : SERVICE_IDS)];
+      const ids = [...new Set(targets)];
       const invalid = ids.filter(id => !SERVICE_IDS.includes(id));
       const invalidOption = rawArgs.find(arg => arg.startsWith("-") && arg !== "--json");
       let results;
@@ -251,16 +297,16 @@ export async function main() {
         results = [{ id: targets[0], success: false, message: `Usage: ${CLI_NAME} <service> update [--json]; use '${CLI_NAME} update <services...>' for multiple services.` }];
       } else if (invalid.length) {
         results = invalid.map(id => ({ id, success: false, message: id === "proxy"
-          ? "The built-in proxy is updated with ai-helper itself; update the ai-helper package or rebuild its executable."
+          ? "The built-in proxy is updated with ai-helper itself; run 'aih update' or rebuild its standalone executable."
           : `Unsupported service '${id}'. Updatable services: ${SERVICE_IDS.join(", ")}.` }));
       } else {
         if (!jsonOutput) printBanner();
         results = [];
-        for (const id of ids) {
+        for (const id of ids.length ? ids : [CLI_NAME]) {
           if (!jsonOutput) process.stdout.write(`  Updating ${bold(id)}... `);
           let result;
           try {
-            result = await manager.updateService(id);
+            result = id === CLI_NAME ? await updateSelfImpl() : await manager.updateService(id);
           } catch (err) {
             result = { success: false, message: err?.message || String(err) };
           }

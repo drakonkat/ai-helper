@@ -1,4 +1,14 @@
 import { PACKAGE_NAME, VERSION } from "./config.js";
+import { npmUpdateInvocation, runUpdateInstaller } from "./utils/update-installer.js";
+
+/** Update only the global npm installation; managed services are left untouched. */
+export async function updateSelf({ spawnImpl, platform = process.platform } = {}) {
+  const result = await runUpdateInstaller("aih", npmUpdateInvocation(PACKAGE_NAME, platform), { spawnImpl });
+  return { ...result, package: PACKAGE_NAME,
+    message: result.success
+      ? `Global npm installation of ${PACKAGE_NAME} updated to latest. Run aih --version to verify; standalone executables still require a rebuild.`
+      : result.message };
+}
 
 export function isNewerVersion(latest, current) {
   const parse = value => typeof value === "string"
@@ -33,7 +43,7 @@ export async function checkForUpdates({ fetchImpl = globalThis.fetch, notify = c
     if (!response.ok) return;
     const { version } = await response.json();
     if (isNewerVersion(version, VERSION)) {
-      notify(`[aih] Update available: ${VERSION} -> ${version}. Run: npm install -g ${PACKAGE_NAME}@latest`);
+      notify(`[aih] Update available: ${VERSION} -> ${version}. Run: aih update (or: npm install -g ${PACKAGE_NAME}@latest)`);
     }
   } catch {
     // An unavailable registry must not prevent services from starting.
