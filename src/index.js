@@ -41,6 +41,7 @@ ${bold("COMMANDS:")}
   ${yellow("<service> update")}            Update one service (for example: aih ocx update)
   ${yellow("logs")} <service> [-n 50] [-f]  View or stream live logs for a service
   ${yellow("stats proxy")} [--json]        Show proxy token savings estimates and recent requests
+  ${yellow("config")} pxpipe-models=<list> Save the proxy model list for future starts
   ${yellow("install")}                     Build standalone binary to ~/.local/bin and verify PATH
   ${yellow("version")}, ${yellow("-v")}, ${yellow("--version")}     Show version information
   ${yellow("help")}, ${yellow("-h")}, ${yellow("--help")}           Show this help message
@@ -79,7 +80,7 @@ ${bold("START DEFAULTS AND MODEL VALUES:")}
   Without service targets, start/up launches ocx, agentmemory, then proxy with:
     upstream: http://127.0.0.1:10100/   listen: http://127.0.0.1:10102   preset: pxpipe
     models: gpt-6-astra,google-antigravity/gemini-3.8*,anthropic/claude-fable*
-  --models on start/up replaces this list for the proxy only.
+  config pxpipe-models=<list> saves a replacement list; --models overrides it.
   Model names are comma-separated; a trailing * matches a prefix (include provider names).
   All models are forwarded; the list selects which ones pxpipe may process.
   Value options accept --flag value or --flag=value. Quote lists, wildcards and spaced paths.
@@ -109,6 +110,7 @@ ${bold("EXAMPLES - STATUS, DASHBOARDS AND LOGS:")}
 
 ${bold("EXAMPLES - START, STOP AND UPDATE:")}
   ${dim("$")} ${cyan(CLI_NAME)} start
+  ${dim("$")} ${cyan(CLI_NAME)} config pxpipe-models="gpt-6-astra,claude-opus-5-5"
   ${dim("$")} ${cyan(CLI_NAME)} start --models "gpt-6-astra,anthropic/claude-fable*" --json
   ${dim("$")} ${cyan(CLI_NAME)} up --models="google-antigravity/gemini-3.8*"
   ${dim("$")} ${cyan(CLI_NAME)} start --models=   ${dim("# Use pxpipe's default model selection")}
@@ -284,6 +286,16 @@ export async function main({ updateSelfImpl = updateSelf } = {}) {
   const targets = serviceFirstUpdate ? [positionalArgs[0].toLowerCase()] : positionalArgs.slice(1);
 
   switch (command) {
+    case "config": {
+      if (targets.length !== 1 || !targets[0].startsWith("pxpipe-models=") || rawArgs.some(arg => arg.startsWith("-"))) {
+        throw new Error('Usage: aih config pxpipe-models="model1,model2" (use pxpipe-models= for pxpipe defaults)');
+      }
+      const state = manager.readState();
+      state.config = { ...state.config, pxpipeModels: targets[0].slice("pxpipe-models=".length) };
+      manager.saveState(state);
+      console.log(green(`Saved pxpipe-models=${state.config.pxpipeModels}; applies on the next proxy start or restart.`));
+      break;
+    }
     case "update": {
       const ids = [...new Set(targets)];
       const invalid = ids.filter(id => !SERVICE_IDS.includes(id));
@@ -428,7 +440,7 @@ export async function main({ updateSelfImpl = updateSelf } = {}) {
           upstream: "http://127.0.0.1:10100/",
           listen: "http://127.0.0.1:10102",
           preset: "pxpipe",
-          models: models ?? "gpt-6-astra,google-antigravity/gemini-3.8*,anthropic/claude-fable*",
+          models: models ?? manager.readState().config?.pxpipeModels ?? "gpt-6-astra,google-antigravity/gemini-3.8*,anthropic/claude-fable*",
         } : id === "proxy" && models !== undefined ? { models } : undefined);
         results.push({ id, ...res });
         if (jsonOutput) continue;

@@ -520,7 +520,8 @@ test("CLI backgrounds, reports readiness, saves options, restarts and stops only
     try { await cli("stop", "proxy"); }
     finally { await rm(dir, { recursive: true, force: true }); }
   });
-  const started = JSON.parse((await cli("start", "proxy", url, "--listen", "http://127.0.0.1:0", "--interceptor", interceptor, "--preset", "pxpipe", "--models", "gpt-5.5*", "--json")).stdout);
+  await cli("config", "pxpipe-models=gpt-5.5*");
+  const started = JSON.parse((await cli("start", "proxy", url, "--listen", "http://127.0.0.1:0", "--interceptor", interceptor, "--preset", "pxpipe", "--json")).stdout);
   assert.equal(started.success, true);
   assert.equal(started.codexConfig.status, "updated");
   assert.match(await readFile(configPath, "utf8"), new RegExp(`openai_base_url = "${started.url}/v1"`));

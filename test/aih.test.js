@@ -104,6 +104,44 @@ describe("Update check", () => {
 });
 
 describe("Service start CLI", () => {
+  it("persists configured models, honors overrides and rejects invalid config commands", async () => {
+    const original = { argv: process.argv, fetch: globalThis.fetch, log: console.log, start: manager.startService };
+    const previous = manager.readState();
+    const calls = [];
+    try {
+      console.log = () => {};
+      globalThis.fetch = async () => ({ ok: true, json: async () => ({ version: VERSION }) });
+      manager.startService = async (id, options) => { calls.push([id, options]); return { success: true }; };
+      process.argv = ["node", "aih", "--help"];
+      const { main } = await import("../src/index.js");
+      const run = async (...args) => { process.argv = ["node", "aih", ...args]; await main(); };
+      for (const saved of ["gpt-6-astra,claude-opus-5-5", ""]) {
+        await run("config", `pxpipe-models=${saved}`);
+        expect(new ServiceManager().readState().config.pxpipeModels).toBe(saved);
+        expect(manager.readState().services).toEqual(previous.services);
+        for (const command of ["start", "up"]) {
+          for (const override of [undefined, "custom/*", ""]) {
+            calls.length = 0;
+            await run(command, "--json", ...(override === undefined ? [] : [`--models=${override}`]));
+            expect(calls.map(([id]) => id)).toEqual(["ocx", "agentmemory", "proxy"]);
+            expect(calls[2][1].models).toBe(override ?? saved);
+            expect(manager.readState().config.pxpipeModels).toBe(saved);
+          }
+        }
+      }
+      for (const args of [[], ["unknown=value"], ["pxpipe-models"], ["pxpipe-models=x", "extra"], ["pxpipe-models=x", "--typo"]]) {
+        await expect(run("config", ...args)).rejects.toThrow("Usage: aih config");
+        expect(manager.readState().config.pxpipeModels).toBe("");
+      }
+    } finally {
+      manager.saveState(previous);
+      process.argv = original.argv;
+      globalThis.fetch = original.fetch;
+      console.log = original.log;
+      manager.startService = original.start;
+    }
+  });
+
   it("starts default services in order and preserves explicit start options", async () => {
     const original = { argv: process.argv, fetch: globalThis.fetch, log: console.log, start: manager.startService };
     const calls = [];

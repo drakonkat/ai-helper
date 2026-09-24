@@ -4,6 +4,13 @@ All notable changes to **`ai-helper` (`aih`)** are documented in this file.
 
 ---
 
+## [1.2.8] - 2026-09-24
+
+### Added
+- Persist the proxy model selection with `aih config pxpipe-models="model1,model2"`. Subsequent starts reuse it; explicit `--models` overrides the saved preference.
+
+---
+
 ## [Unreleased]
 
 ### Added

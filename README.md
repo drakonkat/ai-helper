@@ -296,13 +296,26 @@ aih up --models="gpt-6-astra,anthropic/claude-fable*"  # Equivalent value syntax
 aih start --models=  # Use pxpipe's default model selection
 ```
 
+To save a model list once and reuse it on subsequent starts:
+
+```bash
+aih config pxpipe-models="gpt-6-astra,claude-opus-5-5"
+aih start
+```
+
+The preference is saved in `~/.aih/state.json` (or `AIH_HOME/state.json`).
+It applies to `start`/`up` and proxy starts/restarts; an explicit `--models`
+takes precedence without changing the preference. `aih config pxpipe-models=`
+saves pxpipe's default selection. Configuration does not restart a running proxy.
+
 The value is passed only to the built-in proxy; `ocx` and `agentmemory` start
 normally. `--models=` passes an empty string; `--models ""` also works when your
 shell preserves empty arguments. A bare `--models` without a value is an error.
 See [Select models](#select-models) for matching and compression behavior.
 
 The no-target `start`/`up` commands supply the upstream, listener and preset above
-on every invocation, plus that model list unless `--models` overrides it.
+on every invocation, plus the configured model list (or the list above if unset),
+unless `--models` overrides it.
 Other saved proxy options are retained.
 A first `aih start proxy <upstream>` instead uses listener `http://127.0.0.1:10101`
 and preset `none` unless specified. After configuration, `aih start proxy` reuses

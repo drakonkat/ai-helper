@@ -399,7 +399,11 @@ export class ServiceManager {
   async startProxyService(options) {
     const state = this.loadState();
     const current = state.services.proxy;
-    const config = normalizeProxyOptions({ ...current?.proxyOptions, ...options });
+    const config = normalizeProxyOptions({
+      ...current?.proxyOptions,
+      ...(state.config?.pxpipeModels !== undefined ? { models: state.config.pxpipeModels } : {}),
+      ...options,
+    });
     if (current?.status === "running" && isPidRunning(current.pid)) {
       if (JSON.stringify(config) !== JSON.stringify(current.proxyOptions)) {
         throw new Error("Proxy is already running with different options; use 'aih restart proxy <upstream> [options]'");
