@@ -1,6 +1,4 @@
-import { homedir } from "node:os";
-import { join } from "node:path";
-import { SERVICES, APP_NAME, VERSION } from "./config.js";
+import { APP_NAME, VERSION } from "./config.js";
 import { manager } from "./manager.js";
 import {
   badgeStatus,
@@ -17,22 +15,18 @@ import {
   white,
   yellow,
 } from "./utils/format.js";
-import { killProcessTree, openBrowser } from "./utils/process.js";
+import { killProcessTree } from "./utils/process.js";
+import { getProxyStatsPath, readProxyStats } from "./proxy-stats.js";
 import { getServiceVersions } from "./utils/versions.js";
 import {
-  baseUrl,
   diffRates,
-  fetchText,
-  parseProm,
   probeChain,
-  readSavingsBreakdown,
-  tailJsonl,
 } from "./utils/metrics.js";
 
 const TICK_MS = 1000;
 const STALE_MS = 5 * TICK_MS;
 const VERSION_CHECK_MS = 5 * 60 * 1000;
-const MAX_EVENTS = 200;
+const MAX_EVENTS = 20;
 
 const ALT_SCREEN_ON = "\x1b[?1049h";
 const ALT_SCREEN_OFF = "\x1b[?1049l";
@@ -44,17 +38,6 @@ const CLEAR_BELOW = "\x1b[J";
 const RESET = "\x1b[0m";
 const KEY_UP = "\x1b[A";
 const KEY_DOWN = "\x1b[B";
-
-/**
- * Location of headroom's append-only savings event log: the only real-time
- * per-request source in the ecosystem (pxpipe exposes no API).
- * @returns {string}
- */
-function getEventsFilePath() {
-  const custom = process.env.HEADROOM_HOME;
-  const base = custom && custom.trim().length > 0 ? custom : join(homedir(), ".headroom");
-  return join(base, "savings_events.jsonl");
-}
 
 /**
  * Truncates a possibly coloured string to a visible width, keeping escape
@@ -115,6 +98,28 @@ function age(timestamp, now) {
   return `${Math.floor(seconds / 3600)}h`;
 }
 
+// Snapshot strings are data, never terminal escape sequences or extra rows.
+function plain(value, fallback = "-") {
+  return stripAnsi(String(value ?? fallback)).replace(/[\x00-\x1f\x7f-\x9f]/g, " ");
+}
+
+function timestamp(value) {
+  if (typeof value !== "string") return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function stageList(event) {
+  return Array.isArray(event?.stages) ? event.stages.filter(s => s && typeof s === "object") : [];
+}
+
+function savedTokens(value) {
+  if (!Number.isFinite(value)) return dim("non misurato");
+  if (value > 0) return green(`-${num(value)} tok`);
+  if (value < 0) return yellow(`+${num(-value)} tok`);
+  return dim("0 tok");
+}
+
 /** Wrap complete fields, falling back to words for long descriptions. */
 function wrapCells(cells, width, separator = "  |  ", indent = "  ") {
   const lines = [];
@@ -128,14 +133,25 @@ function wrapCells(cells, width, separator = "  |  ", indent = "  ") {
           lines.push(line);
           line = indent;
         }
-        line += (line === indent ? "" : " ") + word;
+        if (stripAnsi(word).length > width - indent.length) {
+          if (line !== indent) lines.push(line);
+          let remaining = stripAnsi(word);
+          const chunkWidth = Math.max(1, width - indent.length);
+          while (remaining.length > chunkWidth) {
+            lines.push(indent + remaining.slice(0, chunkWidth));
+            remaining = remaining.slice(chunkWidth);
+          }
+          line = indent + remaining;
+        } else line += (line === indent ? "" : " ") + word;
       }
       continue;
     }
     const next = line === indent ? cell : dim(separator) + cell;
     if (line !== indent && stripAnsi(line + next).length > width) {
       lines.push(line);
-      line = indent + (separator === " -> " ? dim("-> ") : "") + cell;
+      // Do not let the continuation arrow clip a field that just fits.
+      const arrow = separator === " -> " && stripAnsi(cell).length + indent.length + 3 <= width ? dim("-> ") : "";
+      line = indent + arrow + cell;
     } else line += next;
   }
   if (line !== indent) lines.push(line);
@@ -165,14 +181,16 @@ function paintNode(node) {
 }
 
 export class Dashboard {
-  constructor({ getVersions = getServiceVersions } = {}) {
+  constructor({ getVersions = getServiceVersions, getProxyStats = readProxyStats } = {}) {
     this.statuses = [];
     this.getVersions = getVersions;
     this.versions = {};
     this.versionsKey = "";
     this.versionsAt = 0;
     this.versionsLoading = false;
-    this.metrics = null;
+    this.versionsGeneration = 0;
+    this.getProxyStats = getProxyStats;
+    this.metricsFile = getProxyStatsPath();
     this.metricsAt = null;
     this.metricsError = null;
     this.metricsKey = "";
@@ -183,12 +201,8 @@ export class Dashboard {
     this.chain = [];
     this.chainAt = null;
     this.showPipelineDetails = false;
-    this.health = null;
     this.events = [];
-    this.eventsOffset = undefined;
-    this.eventsFile = getEventsFilePath();
-    this.eventsFileSeen = false;
-    this.savings = null;
+    this.proxyStats = null;
     this.selected = 0;
     this.status = "";
     this.busy = false;
@@ -207,20 +221,21 @@ export class Dashboard {
     const key = JSON.stringify(this.statuses.map(s => [s.id, s.status, s.pid, s.url]));
     if (key !== this.versionsKey) {
       this.versionsKey = key;
-      this.versionsAt = 0;
-      this.versions = {};
+      this.invalidateVersions();
     }
-    if (this.versionsLoading || (this.versionsAt && Date.now() - this.versionsAt < VERSION_CHECK_MS)) return;
+    if (this.busy || this.versionsLoading || (this.versionsAt && Date.now() - this.versionsAt < VERSION_CHECK_MS)) return;
 
+    const generation = this.versionsGeneration;
+    const isCurrent = () => key === this.versionsKey && generation === this.versionsGeneration;
     this.versionsLoading = true;
     try {
       const versions = await this.getVersions(this.statuses);
-      if (key === this.versionsKey) this.versions = versions;
+      if (isCurrent()) this.versions = versions;
     } catch {
       // An unavailable registry must not interrupt service controls or metrics.
-      if (key === this.versionsKey) this.versions = {};
+      if (isCurrent()) this.versions = {};
     } finally {
-      if (key === this.versionsKey) this.versionsAt = Date.now();
+      if (isCurrent()) this.versionsAt = Date.now();
       this.versionsLoading = false;
       this.render();
     }
@@ -240,31 +255,31 @@ export class Dashboard {
         this.selected = Math.max(0, this.statuses.length - 1);
       }
 
-      const headroom = this.statuses.find(s => s.id === "headroom");
-      const headroomBase = headroom && headroom.status === "running" ? baseUrl(headroom.url) : "";
-
-      const metricsKey = JSON.stringify([headroomBase, headroom?.pid]);
-      if (metricsKey !== this.metricsKey) this.prevMetrics = null;
-      this.metricsKey = metricsKey;
-      const [metricsText, probed] = await Promise.all([
-        headroomBase ? fetchText(`${headroomBase}/metrics`, 2000) : null,
-        probeChain(this.statuses),
-      ]);
-      const parsed = parseProm(metricsText);
+      const proxy = this.statuses.find(s => s.id === "proxy");
+      const stats = await this.getProxyStats();
+      const probed = await probeChain(this.statuses, { nativeOnly: true });
       const now = Date.now();
-      if (Object.keys(parsed).some(name => name.startsWith("headroom_"))) {
-        this.sampleMs = this.prevMetrics ? now - this.prevAt : null;
-        this.rates = diffRates(this.prevMetrics, parsed, this.sampleMs);
-        this.prevMetrics = parsed;
-        this.prevAt = now;
-        this.metrics = parsed;
+      const metricsKey = JSON.stringify([proxy?.url, proxy?.pid, proxy?.status, stats?.since]);
+      if (metricsKey !== this.metricsKey || (stats && stats.requests < this.prevMetrics?.requests)) this.prevMetrics = null;
+      this.metricsKey = metricsKey;
+      if (stats) {
+        // updatedAt is the last preset event, not a heartbeat. An idle proxy's
+        // unchanged snapshot is still readable; retain its real last-event age.
+        this.proxyStats = stats;
         this.metricsAt = now;
-        this.metricsError = null;
+        this.events = stats.recent.filter(ev => ev && typeof ev === "object" && !Array.isArray(ev)).slice(-MAX_EVENTS);
+      }
+      this.metricsError = !proxy ? "Proxy AIH non configurato"
+        : proxy.status !== "running" ? "Proxy AIH non in esecuzione"
+        : !stats ? "Statistiche proxy assenti o non valide" : null;
+      if (!this.metricsError) {
+        const counters = { requests: stats.requests };
+        this.sampleMs = this.prevMetrics ? now - this.prevAt : null;
+        this.rates = diffRates(this.prevMetrics, counters, this.sampleMs);
+        this.prevMetrics = counters;
+        this.prevAt = now;
       } else {
-        // Keep the last totals for diagnosis, never an old gauge or rate as live.
-        this.metricsError = headroom?.status !== "running" ? "Headroom non in esecuzione"
-          : !headroomBase ? "URL Headroom non disponibile"
-          : metricsText === null ? "raccolta fallita" : "risposta senza metriche Headroom";
+        // Keep the last totals and events for diagnosis, but never old rates.
         this.rates = {};
         this.prevMetrics = null;
         this.sampleMs = null;
@@ -272,20 +287,11 @@ export class Dashboard {
 
       this.chain = probed.nodes;
       this.chainAt = now;
-      this.health = probed.health;
-
-      const tail = tailJsonl(this.eventsFile, this.eventsOffset, MAX_EVENTS);
-      this.eventsOffset = tail.offset;
-      if (tail.offset > 0) this.eventsFileSeen = true;
-      if (tail.events.length > 0) {
-        this.events = this.events.concat(tail.events).slice(-MAX_EVENTS);
-      }
-
-      this.savings = readSavingsBreakdown();
     } catch (err) {
       this.metricsError = "aggiornamento fallito";
       this.rates = {};
       this.prevMetrics = null;
+      this.sampleMs = null;
       this.chainAt = null;
       this.status = red(`Refresh error: ${err?.message || err}`);
     } finally {
@@ -295,57 +301,130 @@ export class Dashboard {
 
   /** Pipeline rows wrap whole fields rather than clipping useful values. */
   pipelineLines(width, now = Date.now()) {
-    const lines = [bold("PIPELINE") + dim("  metriche Headroom")];
+    const lines = [bold("PIPELINE") + dim("  metriche proxy AIH")];
     const add = (cells, separator) => lines.push(...wrapCells(cells, width, separator));
     const chainFresh = this.chainAt !== null && now - this.chainAt <= STALE_MS;
     add(this.chain.map(node => paintNode(chainFresh || node.state === "static"
       ? node : { ...node, state: "unknown" })), " -> ");
 
-    const stale = this.metricsAt === null || Boolean(this.metricsError) || now - this.metricsAt > STALE_MS;
+    const stale = this.metricsStale(now);
     const freshness = this.metricsAt === null ? "nessun campione"
       : `ultimo campione ${age(this.metricsAt, now)} fa`;
-    const freshnessText = stale ? yellow(`Dati non aggiornati: ${freshness}`) : `Aggiornati ${age(this.metricsAt, now)} fa`;
+    const freshnessText = stale ? yellow(`Dati non aggiornati: ${freshness}`) : `Letti ${age(this.metricsAt, now)} fa`;
     if (stripAnsi(lines[0] + "  |  " + freshnessText).length <= width) lines[0] += dim("  |  ") + freshnessText;
     else add([freshnessText]);
     if (this.metricsError) add([yellow(this.metricsError)]);
 
-    if (this.metrics) {
-      const m = this.metrics;
-      add([bold("Adesso"), stale ? dim("attivita non disponibile")
-        : `${cyan(bold(num(m.headroom_inbound_requests_active)))} in corso`,
-      ...(stale ? [] : [`${bold(num(this.rates.headroom_requests_total, 2))} req/s`])]);
-      const input = m.headroom_tokens_input_total;
-      const saved = m.headroom_tokens_saved_total;
-      const savingRatio = Number.isFinite(input) && Number.isFinite(saved) && input + saved > 0
-        ? saved / (input + saved) : null;
-      const cacheRatio = Number.isFinite(m.headroom_requests_cached_total) && m.headroom_requests_total > 0
-        ? m.headroom_requests_cached_total / m.headroom_requests_total : null;
-      const latency = Number.isFinite(m.headroom_latency_ms_sum) && m.headroom_latency_ms_count > 0
-        ? m.headroom_latency_ms_sum / m.headroom_latency_ms_count : null;
-      const duration = latency === null ? "-" : latency < 1000 ? `${Math.round(latency)} ms` : `${(latency / 1000).toFixed(1)} s`;
+    const preset = this.statuses.find(s => s.id === "proxy")?.proxyOptions?.preset;
+    if (preset === "none") add([yellow("Preset none: traffico non registrato nelle metriche")]);
+    if (this.proxyStats) {
+      const m = this.proxyStats;
+      const lastAt = timestamp(m.updatedAt);
+      add([bold("Elaborazioni preset"), stale ? dim("attivita non disponibile")
+        : `${cyan(bold(num(this.rates.requests, 2)))} elab/s`,
+      `Ultimo evento ${lastAt === null ? "-" : age(lastAt, now) + " fa"}`]);
+      const changedRatio = Number.isFinite(m.changed) && m.requests > 0 ? m.changed / m.requests : null;
       add([bold("Dall'avvio dei contatori") + (stale ? yellow(" (ultimo campione)") : "")]);
-      add([`Token risparmiati ${bold(pct(savingRatio))}`, `Richieste cached ${bold(pct(cacheRatio))}`,
-        `Durata media ${bold(duration)}`]);
+      add([`Richieste ${bold(num(m.requests))}`, `Modificate ${bold(num(m.changed))} (${pct(changedRatio)})`,
+        `Errori preset ${m.errors > 0 ? red(bold(num(m.errors))) : num(m.errors)}`]);
+      add([`risparmio stimato ${bold(num(m.estimatedSavedTokens))} token${m.unmeasuredStages > 0 ? yellow(" (parziale)") : ""}`]);
+      for (const [name, stage] of Object.entries(m.stages || {})) {
+        if (!stage || typeof stage !== "object") continue;
+        add([`${plain(name)}: ${bold(num(stage.saved))} token`, `applicato ${num(stage.applied)}/${num(stage.requests)}`,
+          ...(stage.unmeasured > 0 ? [yellow(`non misurati ${num(stage.unmeasured)}`)] : [])]);
+      }
     }
+    add([dim("Stime dei preset; esclusi interceptor, cache e fatturazione.")]);
 
     if (this.showPipelineDetails) {
+      add([`Fonte: ${plain(this.metricsFile)}`]);
+      if (this.proxyStats?.since) add([`Contatori dal ${plain(this.proxyStats.since)} (persistono ai riavvii)`]);
       for (const node of this.chain) {
-        if (node.detail) add([`${node.label}: ${node.detail}`]);
+        if (node.detail) add([`${node.label}: ${plain(node.detail)}`]);
         if (node.state === "running") add([yellow(`${node.label}: health non verificato`)]);
       }
       if (!chainFresh) add([yellow("Stati della catena non aggiornati")]);
-      if (this.metrics && !stale) {
-        add([`Token in/s ${num(this.rates.headroom_tokens_input_total, 1)}`,
-          `Token out/s ${num(this.rates.headroom_tokens_output_total, 1)}`]);
+      if (this.proxyStats && !stale) {
         add([dim(this.sampleMs === null ? "Velocita: in attesa del secondo campione"
           : `Velocita: ultimo intervallo di ${(this.sampleMs / 1000).toFixed(1)} s`)]);
       }
-      add([dim("Token risparmiati: saved / (input + saved)")]);
-      add([dim("Richieste cached: cached / richieste totali")]);
-      add([dim("Durata media: somma latenze / campioni")]);
-      add([dim("Cache richieste != risparmio economico")]);
+      add([dim("elab/s: richieste elaborate dai preset, non tutto il traffico proxy")]);
+      add([dim("Risparmio: somma dei delta misurati per stadio; basi non sommabili")]);
+      add([dim("Errori preset != errori upstream; latenza e richieste in corso non misurate")]);
     }
     return lines.map(line => clip(line, width));
+  }
+
+  /** Updates can change an installed version without changing status or PID. */
+  invalidateVersions() {
+    this.versionsGeneration++;
+    this.versionsAt = 0;
+    this.versions = {};
+  }
+
+  metricsStale(now = Date.now()) {
+    return this.metricsAt === null || Boolean(this.metricsError) || now - this.metricsAt > STALE_MS;
+  }
+
+  /** Native recent events are a bounded snapshot, not an append-only log. */
+  requestLines(event, width) {
+    const at = timestamp(event.at);
+    const time = at === null ? "--:--:--" : new Date(at).toLocaleTimeString("it-IT", { hour12: false });
+    const stages = stageList(event);
+    const partial = !event.error && stages.some(stage => !Number.isFinite(stage.saved));
+    const unmeasured = partial && stages.every(stage => !Number.isFinite(stage.saved));
+    const status = event.error ? red(bold("errore preset")) : event.changed === true ? green("modificata")
+      : event.changed === false ? dim("invariata") : dim("esito non disponibile");
+    const lines = wrapCells([gray(time), cyan(plain(event.transport)), magenta(plain(event.model, "?")),
+      plain(event.preset), status,
+      ...(event.error ? [] : [savedTokens(unmeasured ? null : event.saved) + (partial && !unmeasured ? yellow(" (parziale)") : "")]),
+      ...(event.project ? [`progetto: ${plain(event.project)}`] : []),
+      ...(event.sessionId || event.threadId ? [`sessione: ${plain(event.sessionId || event.threadId)}`] : []),
+      ...(!this.showPipelineDetails ? stages.map(s => dim(`${plain(s.name)}: ${plain(s.reason)}`)) : []),
+    ], width, "  ");
+    if (this.showPipelineDetails) {
+      for (const stage of stages) {
+        const ratio = Number.isFinite(stage.before) && stage.before > 0 && Number.isFinite(stage.saved)
+          ? stage.saved / stage.before : null;
+        lines.push(...wrapCells([`${plain(stage.name)}: ${stage.applied ? "applicato" : "bypass"}`,
+          `${num(stage.before)} -> ${num(stage.after)} tok (${pct(ratio)})`,
+          plain(stage.reason), dim(plain(stage.method)),
+        ], width, "  |  ", "    "));
+      }
+    }
+    return lines;
+  }
+
+  streamLines(width, maxRows = Infinity, now = Date.now()) {
+    if (maxRows <= 0) return [];
+    const lines = [clip(bold("STREAM RICHIESTE")
+      + (this.metricsStale(now) && this.proxyStats ? yellow(" (storico)") : "")
+      + dim("  proxy AIH / elaborazioni preset"), width)];
+    if (maxRows === 1) return lines;
+    if (!this.events.length) {
+      const preset = this.statuses.find(s => s.id === "proxy")?.proxyOptions?.preset;
+      const message = preset === "none" ? "preset none: nessun evento di elaborazione"
+        : this.proxyStats ? "in attesa di richieste elaborate dai preset..."
+        : "nessun evento proxy disponibile";
+      return lines.concat(wrapCells([dim(message)], width).slice(0, maxRows - 1));
+    }
+    const groups = [];
+    let available = maxRows - lines.length;
+    // Keep newest complete entries, then show them in chronological order.
+    for (const event of this.events.slice().reverse()) {
+      const group = this.requestLines(event, width);
+      if (group.length > available) {
+        if (!groups.length) {
+          const clipped = group.slice(0, available);
+          if (clipped.length) clipped[clipped.length - 1] = clip(clipped.at(-1), Math.max(0, width - 4)) + dim(" ...");
+          groups.unshift(clipped);
+        }
+        break;
+      }
+      groups.unshift(group);
+      available -= group.length;
+    }
+    return lines.concat(groups.flat());
   }
 
   /**
@@ -365,8 +444,10 @@ export class Dashboard {
       `${dim("s")} start`,
       `${dim("x")} stop`,
       `${dim("r")} restart`,
+      `${dim("u")} update`,
       `${dim("k")} kill`,
-      `${dim("o")} dashboard`,
+      ...(svc?.dashboardUrl ? [`${dim("o")} dashboard`] : []),
+      ...(svc?.repositoryUrl ? [`${dim("g")} GitHub`] : []),
     ], width, "  ", "");
     const footerLines = keyLines.length + 2;
 
@@ -384,6 +465,7 @@ export class Dashboard {
       "UPDATE",
       { header: "PID", align: "right" },
       { header: "UPTIME", align: "right" },
+      "REPO",
       "URL",
     ];
     const rows = this.statuses.map((s, idx) => {
@@ -402,7 +484,8 @@ export class Dashboard {
         update,
         s.pid ? String(s.pid) : dim("-"),
         s.status === "running" ? s.uptime : dim("-"),
-        s.status === "running" && s.url && s.url !== "-" ? cyan(underline(s.url)) : dim(s.url || "-"),
+        s.repositoryUrl ? cyan(underline(s.repositoryUrl.replace("https://github.com/", ""))) : dim("-"),
+        s.id === "proxy" ? dim(`${s.url} (proxy)`) : s.status === "running" && s.url && s.url !== "-" ? cyan(underline(s.url)) : dim(s.url || "-"),
       ];
     });
     if (rows.length > 0) {
@@ -411,58 +494,40 @@ export class Dashboard {
     } else {
       lines.push(dim("  No services."));
     }
+    if (svc?.repositoryUrl) {
+      // Keep both full links accessible when terminal width clips their columns.
+      lines.push(...wrapCells([
+        ...(svc.url && svc.url !== "-" ? [`${dim("URL:")} ${cyan(underline(svc.url))}`] : []),
+        `${dim("GitHub (g):")} ${cyan(underline(svc.repositoryUrl))}`,
+      ], width));
+    }
     lines.push("");
 
-    lines.push(...this.pipelineLines(width));
+    const bodyLimit = height - footerLines;
+    if (lines.length > bodyLimit - 4) {
+      lines.length = Math.max(0, bodyLimit - 4);
+      if (lines.length) lines[lines.length - 1] = dim("  ... servizi: aumenta l'altezza");
+    }
+    const room = bodyLimit - lines.length;
+    const streamRows = this.events.length ? Math.min(6, Math.max(2, Math.floor(room / 3))) : 2;
+    const pipelineBudget = room - streamRows - 1;
+    let pipeline = this.pipelineLines(width);
+    if (pipeline.length > pipelineBudget) {
+      // Never let expanded pipeline explanations consume the request stream.
+      // On small screens prioritize native totals over the topology/details.
+      const m = this.proxyStats;
+      const header = m && this.metricsStale() ? bold("PIPELINE") + yellow(" (storico)") + dim("  metriche proxy AIH") : pipeline[0];
+      pipeline = [header, ...wrapCells(m ? [
+        `Richieste ${num(m.requests)}`, `Modificate ${num(m.changed)}`, `Errori preset ${num(m.errors)}`,
+        `risparmio stimato ${num(m.estimatedSavedTokens)} token${m.unmeasuredStages > 0 ? " (parziale)" : ""}`,
+        ...(this.metricsStale() ? [yellow("Dati storici / attivita non disponibile")] : []),
+      ] : [yellow(this.metricsError || "nessun campione")], width)];
+      pipeline = pipeline.slice(0, Math.max(1, pipelineBudget - 1));
+      if (pipelineBudget > 1) pipeline.push(dim("  ... aumenta l'altezza per la pipeline"));
+    }
+    lines.push(...pipeline);
     lines.push("");
-
-    lines.push(bold("STREAM RICHIESTE") + dim("  " + this.eventsFile));
-
-    // Every event in the stream is source "proxy": headroom is the only service
-    // that reports per-request savings. The split below is the one place that
-    // says how much came from compression versus provider cache reuse.
-    if (this.savings) {
-      const sv = this.savings;
-      const savingsCells = [
-        `${dim("risparmio")} ${green(bold(num(sv.total)))}`,
-        `${dim("compress")} ${bold(num(sv.compression))}`,
-        `${dim("cache")} ${bold(num(sv.cacheReads))}`,
-        `${dim("inviati")} ${bold(num(sv.submitted))}`,
-        `${dim("efficienza")} ${green(bold(pct(sv.ratio)))}`,
-      ];
-      lines.push("  " + savingsCells.join(dim("  .  ")));
-    }
-
-    const slots = Math.max(1, height - lines.length - footerLines);
-
-    if (this.events.length === 0) {
-      lines.push(
-        "  " +
-          dim(
-            this.eventsFileSeen
-              ? "in attesa di richieste..."
-              : "nessun file eventi: headroom non ha ancora scritto savings_events.jsonl"
-          )
-      );
-    } else {
-      for (const ev of this.events.slice(-slots)) {
-        const time = ev.ts ? String(ev.ts).slice(11, 19) : "--:--:--";
-        const before = Number(ev.before);
-        const after = Number(ev.after);
-        const saved = Number(ev.saved);
-        const ratio = Number.isFinite(before) && before > 0 ? saved / before : null;
-        const cost = Number(ev.cost_usd);
-        const cells = [
-          gray(time),
-          magenta(String(ev.model || "?").padEnd(16).slice(0, 16)),
-          `${dim("tok")} ${num(before)}${gray("->")}${num(after)}`,
-          green(`-${num(saved)} (${pct(ratio)})`),
-          dim(Number.isFinite(cost) ? "$" + cost.toFixed(4) : "-"),
-          dim(String(ev.source || ev.client || "")),
-        ];
-        lines.push("  " + cells.join("  "));
-      }
-    }
+    lines.push(...this.streamLines(width, Math.max(2, height - lines.length - footerLines)));
 
     while (lines.length < height - footerLines) lines.push("");
     // Keep controls reachable even when expanded details exceed the terminal.
@@ -501,8 +566,9 @@ export class Dashboard {
 
     try {
       const res = await action(svc);
-      const message = res?.message || `${label} ${svc.id}: fatto`;
-      this.status = res && res.success === false ? red(message) : green(message);
+      const message = [res?.message || `${label} ${svc.id}: fatto`, res?.codexConfig?.message].filter(Boolean).join(" | ");
+      this.status = res && res.success === false ? red(message)
+        : res?.codexConfig?.status === "warning" ? yellow(message) : green(message);
     } catch (err) {
       this.status = red(`${label} ${svc.id}: ${err?.message || err}`);
     } finally {
@@ -544,6 +610,16 @@ export class Dashboard {
       case "r":
         this.runAction("Riavvio", svc => manager.restartService(svc.id));
         return;
+      case "u":
+        return this.runAction("Aggiornamento", async svc => {
+          this.invalidateVersions();
+          try {
+            return await manager.updateService(svc.id);
+          } finally {
+            // Drop pre-update and mid-update checks even if installation failed.
+            this.invalidateVersions();
+          }
+        });
       case "k":
         this.runAction("Kill", async svc => {
           if (!svc.pid) return { success: false, message: `${svc.id}: nessun PID da terminare` };
@@ -551,11 +627,17 @@ export class Dashboard {
         });
         return;
       case "o":
+        if (!this.currentService()?.dashboardUrl) return;
         this.runAction("Dashboard", async svc => {
-          const url = svc.url && svc.url !== "-" ? svc.url : SERVICES[svc.id]?.defaultUrl;
-          if (!url) return { success: false, message: `${svc.id}: nessuna URL disponibile` };
-          openBrowser(url);
-          return { success: true, message: `Aperto ${url}` };
+          const opened = await manager.openDashboard([svc.id]);
+          return { success: opened.length > 0, message: opened.length ? `Aperto ${opened[0].url}` : "Nessuna dashboard disponibile" };
+        });
+        return;
+      case "g":
+        if (!this.currentService()?.repositoryUrl) return;
+        this.runAction("GitHub", async svc => {
+          const opened = await manager.openRepository([svc.id]);
+          return { success: opened.length > 0, message: opened.length ? `Aperto ${opened[0].url}` : "Nessun repository disponibile" };
         });
         return;
       default:

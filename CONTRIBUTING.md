@@ -23,7 +23,7 @@ Thank you for your interest in improving **`ai-helper`**!
 
 3. **Run Automated Tests**:
    ```bash
-   bun test
+   npm test
    ```
 
 ---
@@ -48,13 +48,13 @@ To add a new AI ecosystem service to `aih`:
    };
    ```
 3. Add process matching rules in `src/utils/process.js` inside `discoverRunningProcesses()`.
-4. Run `bun test` to ensure all test assertions pass.
+4. Run `npm test` to ensure all test assertions pass.
 
 ---
 
 ## 📜 Code Style Guidelines
 
-- **Zero External Runtime Dependencies**: Use Node.js & Bun built-in modules (`node:fs`, `node:path`, `node:child_process`).
+- **Prefer Built-in Modules**: Use Node.js & Bun built-ins; the proxy uses `ws` for WebSocket protocol handling.
 - **ES Modules (ESM)**: Always use `import` / `export` syntax with explicit `.js` file extensions.
 - **Cross-Platform Safety**: Always verify path and process management on both Windows and Unix.
 
@@ -66,4 +66,3 @@ To add a new AI ecosystem service to `aih`:
 2. Ensure `bun test` passes.
 3. Write a clear, descriptive commit message.
 4. Submit a Pull Request!
-

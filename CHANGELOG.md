@@ -4,6 +4,22 @@ All notable changes to **`ai-helper` (`aih`)** are documented in this file.
 
 ---
 
+## [1.2.8] - 2026-09-24
+
+### Added
+- Persist the proxy model selection with `aih config pxpipe-models="model1,model2"`. Subsequent starts reuse it; explicit `--models` overrides the saved preference.
+
+---
+
+## [Unreleased]
+
+### Added
+- Explicit managed-service updates with `aih <service> update`, `aih update [services...]`, and the live dashboard's `u` shortcut. Includes clean JSON results, target validation, running-service restart/recovery, and version-cache invalidation; automatic checks remain read-only.
+- GitHub `REPO` column in plain status and the live dashboard, `repositoryUrl` in JSON, and repository opening with `g` or `aih open <service> --repo`.
+- Automatic Codex proxy URL configuration on managed proxy start/restart and ocx start/restart with an active proxy, including actual bound ports, ocx readiness checks, TOML-preserving edits, first-write backups, and `AIH_CODEX_AUTOCONFIG=0` opt-out.
+
+---
+
 ## [1.1.1] - 2026-08-27
 
 ### Updates

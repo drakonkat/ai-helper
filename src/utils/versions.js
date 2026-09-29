@@ -2,13 +2,7 @@ import { execFile } from "node:child_process";
 import { readFile, realpath } from "node:fs/promises";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { baseUrl, fetchJson } from "./metrics.js";
-
-const PACKAGES = {
-  pxpipe: { name: "pxpipe-proxy", bin: "pxpipe" },
-  ocx: { name: "@bitkyc08/opencodex", bin: "ocx", health: "/healthz", service: "opencodex" },
-  agentmemory: { name: "@agentmemory/agentmemory", bin: "agentmemory", health: "/agentmemory/health", service: "agentmemory" },
-  headroom: { name: "headroom-ai", bin: "headroom", health: "/health", pypi: true },
-};
+import { SERVICE_PACKAGES as PACKAGES } from "../config.js";
 
 function parseVersion(value) {
   if (typeof value !== "string") return null;

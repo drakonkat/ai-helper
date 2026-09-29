@@ -100,4 +100,81 @@ describe("dashboard service versions", () => {
     expect(row).toMatch(/n\/d\s+n\/d/);
     expect(row).not.toContain("aggiornato");
   });
+
+  it("updates the selected stopped service once and refreshes its version cache", async () => {
+    const current = { version: "2.49.0", latestVersion: "2.49.0", updateAvailable: false };
+    const getVersions = mock(async () => ({ ocx: current }));
+    const dashboard = new Dashboard({ getVersions });
+    dashboard.statuses = services.map(s => ({ ...s, status: "stopped", pid: null }));
+    dashboard.selected = 1;
+    await dashboard.refreshVersions();
+    dashboard.versions.ocx = available;
+    let finish;
+    const original = manager.updateService;
+    const update = mock(() => new Promise(resolve => { finish = resolve; }));
+    manager.updateService = update;
+    dashboard.refresh = async () => { await dashboard.refreshVersions(); };
+    try {
+      const updating = dashboard.onKey("u");
+      await dashboard.onKey("u");
+      expect(update).toHaveBeenCalledTimes(1);
+      expect(update).toHaveBeenCalledWith("ocx");
+      expect(dashboard.busy).toBe(true);
+      expect(stripAnsi(dashboard.status)).toContain("Aggiornamento ocx");
+      finish({ success: true, message: "Updated to 2.49.0" });
+      await updating;
+      expect(dashboard.busy).toBe(false);
+      expect(getVersions).toHaveBeenCalledTimes(2);
+      expect(dashboard.versions.ocx).toEqual(current);
+      expect(stripAnsi(dashboard.status)).toContain("Updated to 2.49.0");
+      expect(dashboard.buildLines().map(stripAnsi).join("\n")).toContain("u update");
+    } finally {
+      manager.updateService = original;
+    }
+  });
+
+  it("discards an in-flight pre-update check even when status and PID stay unchanged", async () => {
+    let finish;
+    const getVersions = mock(() => new Promise(resolve => { finish = resolve; }));
+    const dashboard = new Dashboard({ getVersions });
+    dashboard.statuses = [{ id: "ocx", status: "stopped", pid: null }];
+    const checking = dashboard.refreshVersions();
+    const original = manager.updateService;
+    manager.updateService = async () => ({ success: true, message: "Updated" });
+    dashboard.refresh = async () => { await dashboard.refreshVersions(); };
+    try {
+      await dashboard.onKey("u");
+      expect(getVersions).toHaveBeenCalledTimes(1);
+      finish({ ocx: available });
+      await checking;
+      expect(dashboard.versions).toEqual({});
+      expect(dashboard.versionsAt).toBe(0);
+      const refreshed = dashboard.refreshVersions();
+      finish({ ocx: { version: "2.49.0", latestVersion: "2.49.0", updateAvailable: false } });
+      await refreshed;
+      expect(getVersions).toHaveBeenCalledTimes(2);
+      expect(dashboard.versions.ocx.version).toBe("2.49.0");
+    } finally {
+      manager.updateService = original;
+    }
+  });
+
+  it("shows failed or unsupported update results and remains responsive", async () => {
+    const dashboard = new Dashboard({ getVersions: async () => ({}) });
+    dashboard.statuses = [{ id: "proxy", status: "running", pid: 100 }];
+    dashboard.refresh = async () => { await dashboard.refreshVersions(); };
+    const original = manager.updateService;
+    try {
+      manager.updateService = async id => ({ success: false, message: `${id}: update ai-helper itself` });
+      await dashboard.onKey("u");
+      expect(stripAnsi(dashboard.status)).toContain("proxy: update ai-helper itself");
+      expect(dashboard.busy).toBe(false);
+      manager.updateService = async () => { throw new Error("Installer failed"); };
+      await dashboard.onKey("u");
+      expect(stripAnsi(dashboard.status)).toContain("Installer failed");
+      expect(dashboard.busy).toBe(false);
+    } finally {
+      manager.updateService = original;
+    }
+  });
 });

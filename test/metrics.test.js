@@ -10,7 +10,8 @@ import {
   probeChain,
   readSavingsBreakdown,
 } from "../src/utils/metrics.js";
-import { splitKeys } from "../src/tui.js";
+import { Dashboard, splitKeys } from "../src/tui.js";
+import { stripAnsi } from "../src/utils/format.js";
 import { resolveAgentmemoryViewerPort } from "../src/utils/process.js";
 
 const SAMPLE = [
@@ -132,6 +133,75 @@ describe("probeChain", () => {
     }
   };
 
+  it("keeps native topology without inventing stages when proxy status is absent", async () => {
+    const { nodes, health } = await probeChain([], { nativeOnly: true });
+    expect(nodes.map(n => n.id)).toEqual(["client", "proxy", "upstream"]);
+    expect(nodes[1]).toEqual({ id: "proxy", label: "aih proxy", state: "unknown", detail: "" });
+    expect(nodes[2]).toEqual({ id: "upstream", label: "upstream", state: "unknown", detail: "" });
+    expect(health).toBeNull();
+  });
+
+  it("uses native topology for a proxy even when its options are missing", async () => {
+    const { nodes } = await probeChain([
+      { id: "proxy", status: "stopped", url: "http://127.0.0.1:10102" },
+      { id: "headroom", status: "running", url: "http://127.0.0.1:9" },
+      { id: "pxpipe", status: "running", url: "http://127.0.0.1:47821" },
+    ]);
+    expect(nodes.map(n => n.id)).toEqual(["client", "proxy", "upstream"]);
+    expect(nodes[1].state).toBe("stopped");
+    expect(nodes[1].detail).toBe("http://127.0.0.1:10102");
+    expect(nodes[2].state).toBe("unknown");
+    expect(nodes[2].detail).toBe("");
+  });
+
+  it("never probes Headroom in native-only mode, including missing proxy configuration", async () => {
+    let requests = 0;
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        requests++;
+        return Response.json({ status: "healthy" });
+      },
+    });
+    try {
+      for (const proxy of [
+        null,
+        { id: "proxy", status: "running" },
+        { id: "proxy", status: "running", proxyOptions: { preset: "headroom", headroomUrl: server.url.href } },
+      ]) {
+        const statuses = [{ id: "headroom", status: "running", url: server.url.href }];
+        if (proxy) statuses.push(proxy);
+        const { nodes, health } = await probeChain(statuses, { nativeOnly: true });
+        expect(nodes[1].id).toBe("proxy");
+        expect(health).toBeNull();
+      }
+      expect(requests).toBe(0);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  it("retains configured native stages and URLs without claiming upstream health", async () => {
+    const { nodes, health } = await probeChain([{
+      id: "proxy", status: "running", url: "http://127.0.0.1:10102",
+      proxyOptions: { preset: "rtk-headroom-pxpipe", headroomUrl: "http://127.0.0.1:8787", upstream: "http://127.0.0.1:10100/v1" },
+    }], { nativeOnly: true });
+    expect(nodes.map(n => n.id)).toEqual(["client", "proxy", "rtk", "headroom", "pxpipe", "upstream"]);
+    expect(nodes[2].label).toBe("rtk (pipe)");
+    expect(nodes[3].detail).toBe("http://127.0.0.1:8787");
+    expect(nodes[4].label).toBe("pxpipe (libreria)");
+    expect(nodes[4].state).toBe("running");
+    expect(nodes[5].state).toBe("unknown");
+    expect(nodes[5].detail).toBe("http://127.0.0.1:10100/v1");
+    expect(health).toBeNull();
+  });
+
+  it.each([undefined, "none", "unrecognized"])("does not invent compression stages for preset %s", async preset => {
+    const { nodes } = await probeChain([{ id: "proxy", status: "running", proxyOptions: { preset } }]);
+    expect(nodes.map(n => n.id)).toEqual(["client", "proxy", "upstream"]);
+  });
+
   it("builds the static chain when headroom does not answer", async () => {
     const { nodes, health } = await probeChain([
       { id: "headroom", status: "stopped", url: "http://127.0.0.1:9/dashboard" },
@@ -219,6 +289,39 @@ describe("splitKeys", () => {
     expect(splitKeys("\x1b[A")).toEqual(["\x1b[A"]);
     expect(splitKeys("\x1b[Bs")).toEqual(["\x1b[B", "s"]);
     expect(splitKeys("qx")).toEqual(["q", "x"]);
+  });
+});
+
+describe("proxy visibility", () => {
+  it("shows preset savings and wiring without offering a proxy dashboard", async () => {
+    const dashboard = new Dashboard();
+    dashboard.statuses = [{ id: "proxy", status: "running", url: "http://127.0.0.1:10102", dashboardUrl: null,
+      proxyOptions: { preset: "rtk-pxpipe", upstream: "http://127.0.0.1:10100" } }];
+    dashboard.proxyStats = { requests: 2, changed: 1, errors: 0, estimatedSavedTokens: 120,
+      stages: { rtk: { saved: 20, applied: 1, requests: 2 }, pxpipe: { saved: 100, applied: 1, requests: 2 } }, recent: [] };
+    let opened = false;
+    dashboard.runAction = () => { opened = true; };
+    dashboard.onKey("o");
+    expect(opened).toBe(false);
+    const screen = dashboard.buildLines().join("\n");
+    expect(screen).toContain("VERSION");
+    expect(screen).toContain("UPDATE");
+    expect(screen).toContain("risparmio stimato 120");
+    expect(screen).toContain("rtk: 20");
+    expect(screen).toContain("pxpipe: 100");
+    expect(screen).not.toContain("o\x1b[0m dashboard");
+    expect(screen).not.toContain("\x1b[4mhttp://127.0.0.1:10102");
+    const chain = await probeChain(dashboard.statuses);
+    expect(chain.nodes.map(n => n.id)).toEqual(["client", "proxy", "rtk", "pxpipe", "upstream"]);
+    expect(chain.nodes[3].label).toBe("pxpipe (libreria)");
+    dashboard.chain = chain.nodes;
+    dashboard.chainAt = Date.now();
+    const pipeline = () => dashboard.pipelineLines(100).map(stripAnsi).join("\n");
+    expect(pipeline()).toContain("aih proxy: processo attivo");
+    expect(pipeline()).toContain("pxpipe (libreria): processo attivo");
+    dashboard.onKey("d");
+    expect(pipeline()).toContain("aih proxy: http://127.0.0.1:10102");
+    expect(pipeline()).toContain("upstream: http://127.0.0.1:10100");
   });
 });
 
