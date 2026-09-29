@@ -7,6 +7,51 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { ServiceManager } from "../src/manager.js";
 import { SERVICES } from "../src/config.js";
+import fs from "node:fs";
+import childProcess from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
+import { spawnDetachedProcess } from "../src/utils/process.js";
+
+test("detached service launches close the parent log descriptor, including when spawn throws", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "aih codex manager-fd-"));
+  const oldHome = process.env.AIH_HOME;
+  process.env.AIH_HOME = dir;
+  let fd;
+  t.after(async () => {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    // Also release the descriptor when the regression assertion fails.
+    if (fd !== undefined) fs.closeSync(fd);
+    if (oldHome === undefined) delete process.env.AIH_HOME;
+    else process.env.AIH_HOME = oldHome;
+    const target = resolve(dir);
+    assert.equal(dirname(target), resolve(tmpdir()));
+    assert.ok(basename(target).startsWith("aih codex manager-fd-"));
+    await rm(target, { recursive: true, force: true });
+  });
+  for (const fail of [false, true]) {
+    let unreferenced = false;
+    const spawnError = new Error("fixture spawn failure");
+    const spawn = t.mock.method(childProcess, "spawn", (_command, _args, options) => {
+      fd = options.stdio[1];
+      assert.equal(options.stdio[2], fd);
+      assert.ok(fs.fstatSync(fd).isFile());
+      if (fail) throw spawnError;
+      return { pid: 123, unref() { unreferenced = true; } };
+    });
+    syncBuiltinESMExports();
+    const launch = () => spawnDetachedProcess("fixture", join(dir, "service.log"));
+    if (fail) assert.throws(launch, spawnError);
+    else {
+      assert.deepEqual(launch(), { pid: 123 });
+      assert.equal(unreferenced, true);
+    }
+    assert.throws(() => fs.fstatSync(fd), { code: "EBADF" });
+    fd = undefined;
+    spawn.mock.restore();
+    syncBuiltinESMExports();
+  }
+});
 
 test("manager start/restart ocx reapplies proxy config after late ocx writes, without touching external services", { timeout: 40000 }, async t => {
   const dir = await mkdtemp(join(tmpdir(), "aih codex manager-"));

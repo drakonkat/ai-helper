@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { openSync, appendFileSync } from "node:fs";
+import { openSync, appendFileSync, closeSync } from "node:fs";
 import { ensureDir, getLogsDir } from "./path.js";
 
 /**
@@ -221,14 +221,20 @@ export function spawnDetachedProcess(command, logFilePath, options) {
 
   const fd = openSync(logFilePath, "a");
 
-  const proc = spawn(command, [], {
-    shell: true,
-    detached: true,
-    stdio: ["ignore", fd, fd],
-    env: { ...process.env, ...options?.env },
-    cwd: options?.cwd,
-    windowsHide: true,
-  });
+  let proc;
+  try {
+    proc = spawn(command, [], {
+      shell: true,
+      detached: true,
+      stdio: ["ignore", fd, fd],
+      env: { ...process.env, ...options?.env },
+      cwd: options?.cwd,
+      windowsHide: true,
+    });
+  } finally {
+    // The child owns its inherited handles; the parent must not keep the log open.
+    closeSync(fd);
+  }
 
   proc.unref();
 
