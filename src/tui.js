@@ -378,6 +378,8 @@ export class Dashboard {
     const lines = wrapCells([gray(time), cyan(plain(event.transport)), magenta(plain(event.model, "?")),
       plain(event.preset), status,
       ...(event.error ? [] : [savedTokens(unmeasured ? null : event.saved) + (partial && !unmeasured ? yellow(" (parziale)") : "")]),
+      ...(event.project ? [`progetto: ${plain(event.project)}`] : []),
+      ...(event.sessionId || event.threadId ? [`sessione: ${plain(event.sessionId || event.threadId)}`] : []),
       ...(!this.showPipelineDetails ? stages.map(s => dim(`${plain(s.name)}: ${plain(s.reason)}`)) : []),
     ], width, "  ");
     if (this.showPipelineDetails) {

@@ -142,7 +142,16 @@ export async function createPresetHooks(config, onStats = () => {}) {
       // Observability must never interrupt proxy traffic; no request bodies are passed to the recorder.
       // Optional correlation only; never pass headers or bodies to the recorder.
       const requestId = typeof context.headers?.["x-request-id"] === "string" ? context.headers["x-request-id"].slice(0, 128) : undefined;
-      try { onStats({ model, preset: config.preset, transport: websocket ? "WS" : "HTTP", changed, stages, error, ...(requestId ? { requestId } : {}) }); } catch {}
+      let source = {};
+      try {
+        const metadata = JSON.parse(context.headers?.["x-codex-turn-metadata"] || "{}");
+        const remotes = Object.values(metadata.workspaces || {}).flatMap(workspace => Object.values(workspace?.associated_remote_urls || {}));
+        const project = remotes.filter(value => typeof value === "string").map(value => value.replace(/^[^@/]+@[^:/]+:/, "")
+          .replace(/^[a-z]+:\/\/[^/]+/i, "").split(/[?#]/)[0].replace(/\.git$/i, "").split("/").filter(Boolean).slice(-2).join("/")).find(Boolean);
+        source = Object.fromEntries(Object.entries({ sessionId: metadata.session_id, threadId: metadata.thread_id, project })
+          .filter(([, value]) => typeof value === "string" && value.length).map(([key, value]) => [key, value.slice(0, 128)]));
+      } catch {}
+      try { onStats({ model, preset: config.preset, transport: websocket ? "WS" : "HTTP", changed, stages, error, ...source, ...(requestId ? { requestId } : {}) }); } catch {}
     };
     try {
       // Fixed stage order, including the triple recipe: RTK -> Headroom -> pxpipe.

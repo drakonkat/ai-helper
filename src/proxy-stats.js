@@ -40,7 +40,8 @@ export function createProxyStatsRecorder(file = getProxyStatsPath()) {
       stats.estimatedSavedTokens += saved;
       const model = String(event.model).replace(/[\r\n]/g, " ").slice(0, 128);
       stats.recent.push({ at: stats.updatedAt, model, preset: event.preset, transport: event.transport,
-        changed: event.changed, error: Boolean(event.error), saved: event.error ? null : saved, stages });
+        changed: event.changed, error: Boolean(event.error), saved: event.error ? null : saved,
+        sessionId: event.sessionId, threadId: event.threadId, project: event.project, stages });
       stats.recent = stats.recent.slice(-20);
       mkdirSync(dirname(file), { recursive: true });
       const temporary = `${file}.${process.pid}.tmp`;
