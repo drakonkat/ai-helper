@@ -1,0 +1,24 @@
+Name,WinGet,Chocolatey,Source
+Git,Git.Git,git,winget
+NVM for Windows,CoreyButler.NVMforWindows,nvm,winget
+JetBrains Toolbox,JetBrains.Toolbox,jetbrainstoolbox,winget
+WebStorm,JetBrains.WebStorm,webstorm,winget
+PhpStorm,JetBrains.PhpStorm,phpstorm,winget
+Codex Desktop,9PLM9XGG6VKS,,msstore
+Claude Desktop,Anthropic.Claude,claude,winget
+Docker Desktop,Docker.DockerDesktop,docker-desktop,winget
+Telegram,Telegram.TelegramDesktop,telegram,winget
+Steam,Valve.Steam,steam,winget
+Discord,Discord.Discord,discord,winget
+Teams personale (app unificata),Microsoft.Teams,microsoft-teams-new-bootstrapper,winget
+Notepad++,Notepad++.Notepad++,notepadplusplus,winget
+Logitech G HUB,Logitech.GHUB,lghub,winget
+ShareX,ShareX.ShareX,sharex,winget
+SteelSeries GG,SteelSeries.GG,steelseries-engine,winget
+Ditto,Ditto.Ditto,ditto,winget
+PowerToys,Microsoft.PowerToys,powertoys,winget
+Corsair iCUE 5,Corsair.iCUE.5,icue,winget
+Google Drive,Google.GoogleDrive,googledrive,winget
+Google Chrome,Google.Chrome,googlechrome,winget
+Brave,Brave.Brave,brave,winget
+Perforce P4V e CLI,Perforce.P4V,p4v,winget
