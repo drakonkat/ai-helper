@@ -4,6 +4,14 @@ All notable changes to **`ai-helper` (`aih`)** are documented in this file.
 
 ---
 
+## [1.2.9] - 2026-09-29
+
+### Added
+- Show the originating Codex session and Git project in the live request stream when request metadata is available; persist these identifiers in the proxy statistics snapshot.
+- Include the Windows Astra launcher from main alongside the native proxy commands, and workstation restore scripts in the repository.
+
+---
+
 ## [1.2.8] - 2026-09-24
 
 ### Added

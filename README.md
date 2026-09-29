@@ -189,7 +189,15 @@ proxy traffic or token-generation speed. Counters persist across restarts.
 
 `STREAM RICHIESTE` shows the latest recorded events with local time, model,
 HTTP/WS transport, preset, changed/unchanged/error outcome, estimated savings
-and stage reasons. Press **`d`** for source/configuration details and per-stage
+and stage reasons. When Codex supplies `x-codex-turn-metadata`, events also show
+the session ID (falling back to the thread ID) and Git project (`owner/repo` from
+the first available workspace remote). These fields are recorded only for new
+requests; older events or clients without this metadata omit them. After an
+upgrade, restart the proxy and reopen the updated dashboard; a source checkout
+can be run directly with `node bin/cli.js status --ui` to avoid an older global
+installation taking precedence on PATH.
+
+Press **`d`** for source/configuration details and per-stage
 before/after token counts, percentages and measurement methods. Unknown savings
 remain unknown; partial estimates and token increases are explicitly marked.
 The panels do not infer provider cache savings, costs, upstream latency or
