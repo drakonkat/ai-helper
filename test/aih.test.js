@@ -437,12 +437,13 @@ describe("Process Utilities", () => {
     expect(isPidRunning(9999999)).toBe(false);
   });
 
+  // Like getStatus below, Windows discovery includes a cold PowerShell/CIM startup.
   it("should not discover the current process PID as a service", async () => {
     const discovered = await discoverRunningProcesses();
     for (const id of Object.keys(discovered)) {
       expect(discovered[id].pid).not.toBe(process.pid);
     }
-  });
+  }, 15000);
 });
 
 describe("Service Manager", () => {
