@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { promisify } from "node:util";
 import zlib from "node:zlib";
+import { performance } from "node:perf_hooks";
 import { tokenStage } from "./proxy-stats.js";
 import { requestImages } from "./request-images.js";
 
@@ -119,7 +120,7 @@ export async function createPresetHooks(config, onStats = () => {}) {
       JSON.stringify(result.messages) !== JSON.stringify(messages), result.compression_skipped ? "compression_skipped" : "processed", "headroom");
   }
 
-  async function transform(raw, context, websocket = false) {
+  async function transform(raw, context, websocket = false, started = performance.now()) {
     const path = new URL(context.path, "http://localhost").pathname;
     const format = /\/(?:v1\/|anthropic\/)?messages$/.test(path) ? "anthropic"
       : /\/chat\/completions$/.test(path) ? "chat" : /\/responses$/.test(path) ? "responses" : null;
@@ -151,7 +152,13 @@ export async function createPresetHooks(config, onStats = () => {}) {
         source = Object.fromEntries(Object.entries({ sessionId: metadata.session_id, threadId: metadata.thread_id, project })
           .filter(([, value]) => typeof value === "string" && value.length).map(([key, value]) => [key, value.slice(0, 128)]));
       } catch {}
-      try { onStats({ model, preset: config.preset, transport: websocket ? "WS" : "HTTP", changed, stages, error, ...source, ...(requestId ? { requestId } : {}) }); } catch {}
+      try {
+        const update = onStats({ model, preset: config.preset, transport: websocket ? "WS" : "HTTP", changed, stages, error,
+          timings: { presetMs: Math.round((performance.now() - started) * 10) / 10 },
+          ...source, ...(requestId ? { requestId } : {}) });
+        // ponytail: WS measures presets only; response timings need per-response-ID correlation.
+        if (!websocket && typeof update === "function") context.updateTiming = update;
+      } catch {}
     };
     try {
       // Fixed stage order, including the triple recipe: RTK -> Headroom -> pxpipe.
@@ -212,13 +219,15 @@ export async function createPresetHooks(config, onStats = () => {}) {
       } else if (px) {
         stages.push(tokenStage("pxpipe", 0, 0, false, "model_excluded", "pxpipe_estimate"));
       }
+      const output = changed ? Buffer.from(JSON.stringify(envelope)) : raw;
       report(false);
-      return changed ? Buffer.from(JSON.stringify(envelope)) : raw;
+      return output;
     } catch (error) { report(true); throw error; }
   }
 
   return {
     async onRequest(context) {
+      const started = performance.now();
       if (context.method !== "POST" || !/\bapplication\/(?:[\w.-]+\+)?json\b/i.test(String(context.headers["content-type"] || ""))) return;
       const encoding = String(context.headers["content-encoding"] || "identity").toLowerCase();
       if (encoding !== "identity" && !DECODERS[encoding]) {
@@ -229,7 +238,7 @@ export async function createPresetHooks(config, onStats = () => {}) {
         return;
       }
       const raw = encoding === "identity" ? context.body : await DECODERS[encoding](context.body, { maxOutputLength: config.maxBodyBytes });
-      const body = await transform(raw, context);
+      const body = await transform(raw, context, false, started);
       if (body !== raw) {
         context.body = body;
         delete context.headers["content-encoding"];

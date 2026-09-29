@@ -4,7 +4,8 @@ import http from "node:http";
 import { once } from "node:events";
 import { mkdtemp, writeFile, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { gzipSync } from "node:zlib";
@@ -53,6 +54,8 @@ function request(url, options = {}, body) {
 }
 async function temp(t) {
   const dir = await mkdtemp(join(tmpdir(), "aih proxy-"));
+  assert.equal(dirname(resolve(dir)), resolve(tmpdir()));
+  assert.ok(basename(dir).startsWith("aih proxy-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   return dir;
 }
@@ -112,6 +115,146 @@ test("pxpipe preset uses the real library, gates models, and preserves WS envelo
   }
   assert.equal(measurements.length, 5); // No counting binary frames or upstream responses.
   assert.equal(measurements[1].stages[0].reason, "model_excluded");
+  assert.ok(measurements.every(event => Number.isFinite(event.timings.presetMs) && event.timings.presetMs >= 0));
+  assert.equal(request.updateTiming, undefined); // A WS connection is not a single response.
+  assert.deepEqual(Object.keys(measurements.at(-1).timings), ["presetMs"]);
+});
+
+test("timing updates persist out of order without recounting or resurrecting evicted requests", async t => {
+  const file = join(await temp(t), "stats.json");
+  const record = createProxyStatsRecorder(file);
+  const event = { model: "first", preset: "pxpipe", transport: "HTTP", changed: true,
+    stages: [tokenStage("pxpipe", 10, 8, true, "applied", "estimate")], timings: { presetMs: 2 } };
+  const first = record(event);
+  const second = record({ ...event, model: "second" });
+  const before = readProxyStats(file);
+  second({ totalMs: 10, state: "completed" });
+  first({ upstreamHeadersMs: 20, state: "responding" });
+  first({ totalMs: 30, state: "completed" });
+  const after = readProxyStats(file);
+  assert.equal(after.requests, 2);
+  assert.equal(after.estimatedSavedTokens, 4);
+  assert.deepEqual(after.stages, before.stages);
+  assert.equal(after.updatedAt, before.updatedAt);
+  assert.deepEqual(after.recent.map(e => e.at), before.recent.map(e => e.at));
+  assert.deepEqual(after.recent[0].timings, { presetMs: 2, upstreamHeadersMs: 20, totalMs: 30, state: "completed" });
+  assert.equal(after.recent[1].timings.totalMs, 10);
+  for (let i = 0; i < 20; i++) record({ ...event, model: `later-${i}` });
+  const evicted = await readFile(file, "utf8");
+  first({ totalMs: 999 });
+  assert.equal(await readFile(file, "utf8"), evicted);
+});
+
+test("HTTP/SSE timing updates preserve streaming, concurrency and upstream error statuses", { timeout: 15000 }, async t => {
+  const dir = await temp(t);
+  const file = join(dir, "stats.json");
+  const interceptor = join(dir, "delay.mjs");
+  await writeFile(interceptor, "export async function onRequest() { await new Promise(r => setTimeout(r, 30)); }\n");
+  const record = createProxyStatsRecorder(file);
+  let streamResponse;
+  let arrive;
+  const arrived = new Promise(resolve => { arrive = resolve; });
+  let events = 0;
+  const { proxy } = await fixture(t, (req, res) => {
+    req.resume();
+    if (req.headers["x-case"] === "fast") { res.writeHead(503); res.end("upstream unavailable"); }
+    else { streamResponse = res; arrive(); }
+  }, { preset: "pxpipe", models: "excluded", interceptor, onStats: event => {
+    events++;
+    return record(event);
+  } });
+  const options = { method: "POST", headers: { "content-type": "application/json" } };
+  const outgoing = http.request(proxy.url + "/v1/responses", options);
+  t.after(() => outgoing.destroy());
+  const response = once(outgoing, "response");
+  outgoing.end(JSON.stringify({ model: "slow", input: "hello" }));
+  await arrived;
+  assert.equal(readProxyStats(file).recent[0].timings.state, "waiting");
+  await delay(30);
+  streamResponse.writeHead(200, { "content-type": "text/event-stream" });
+  streamResponse.flushHeaders();
+  const [incoming] = await response;
+  const headerTiming = readProxyStats(file).recent[0].timings;
+  assert.equal(headerTiming.state, "responding");
+  assert.ok(headerTiming.upstreamHeadersMs >= 20);
+  assert.equal(headerTiming.totalMs, undefined);
+  const chunk = once(incoming, "data");
+  streamResponse.write("data: first\n\n");
+  assert.equal((await chunk)[0].toString(), "data: first\n\n");
+  assert.equal(incoming.readableEnded, false);
+  const fast = await request(proxy.url + "/v1/responses", {
+    ...options, headers: { ...options.headers, "x-case": "fast" },
+  }, JSON.stringify({ model: "fast", input: "hello" }));
+  assert.equal(fast.status, 503);
+  let stats = readProxyStats(file);
+  assert.equal(stats.recent[0].timings.totalMs, undefined);
+  assert.equal(stats.recent[1].timings.statusCode, 503);
+  assert.equal(stats.recent[1].timings.state, "completed");
+  const ended = once(incoming, "end");
+  streamResponse.end("data: done\n\n");
+  incoming.resume();
+  await ended;
+  stats = readProxyStats(file);
+  assert.equal(events, 2);
+  assert.equal(stats.requests, 2);
+  assert.equal(stats.errors, 0); // An upstream 503 is not a preset error.
+  assert.deepEqual(stats.recent.map(event => event.model), ["slow", "fast"]);
+  const timing = stats.recent[0].timings;
+  assert.equal(timing.state, "completed");
+  assert.equal(timing.statusCode, 200);
+  assert.ok(timing.presetMs >= 0);
+  assert.ok(timing.totalMs >= timing.presetMs + timing.upstreamHeadersMs + 20); // Custom interceptor is only in total.
+});
+
+test("HTTP timing distinguishes transport failure and client cancellation without counting twice", { timeout: 15000 }, async t => {
+  const file = join(await temp(t), "stats.json");
+  const record = createProxyStatsRecorder(file);
+  const completions = [];
+  let streamResponse;
+  const { proxy } = await fixture(t, (req, res) => {
+    req.resume();
+    if (req.headers["x-case"] === "fail") { res.destroy(); return; }
+    streamResponse = res;
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.write("data: first\n\n");
+    if (req.headers["x-case"] === "truncate") setTimeout(() => res.destroy(), 30);
+  }, { preset: "pxpipe", models: "excluded", onStats: event => {
+    const update = record(event);
+    let complete;
+    completions.push(new Promise(resolve => { complete = resolve; }));
+    return timing => {
+      update(timing);
+      if (Number.isFinite(timing.totalMs)) complete();
+    };
+  } });
+  const options = name => ({ method: "POST", headers: { "content-type": "application/json", "x-case": name } });
+  const body = JSON.stringify({ model: "test", input: "hello" });
+  assert.equal((await request(proxy.url + "/v1/responses", options("fail"), body)).status, 502);
+  await completions[0];
+  let timing = readProxyStats(file).recent.at(-1).timings;
+  assert.equal(timing.state, "error");
+  assert.equal(timing.upstreamHeadersMs, undefined);
+  assert.ok(timing.totalMs >= 0);
+  await assert.rejects(request(proxy.url + "/v1/responses", options("truncate"), body));
+  await completions[1];
+  timing = readProxyStats(file).recent.at(-1).timings;
+  assert.equal(timing.state, "error");
+  assert.equal(timing.statusCode, 200);
+  const outgoing = http.request(proxy.url + "/v1/responses", options("cancel"));
+  t.after(() => outgoing.destroy());
+  const response = once(outgoing, "response");
+  outgoing.end(body);
+  const [incoming] = await response;
+  await once(incoming, "data");
+  const closed = once(streamResponse, "close");
+  incoming.destroy();
+  await closed;
+  await completions[2];
+  const stats = readProxyStats(file);
+  assert.equal(stats.recent.at(-1).timings.state, "aborted");
+  assert.ok(stats.recent.at(-1).timings.totalMs >= 0);
+  assert.equal(stats.requests, 3);
+  assert.equal(stats.errors, 0);
 });
 
 test("proxy counters persist, keep negative savings and unknown estimates, and omit body content", async t => {

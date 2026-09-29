@@ -98,6 +98,11 @@ function age(timestamp, now) {
   return `${Math.floor(seconds / 3600)}h`;
 }
 
+function duration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return "n/d";
+  return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
+}
+
 // Snapshot strings are data, never terminal escape sequences or extra rows.
 function plain(value, fallback = "-") {
   return stripAnsi(String(value ?? fallback)).replace(/[\x00-\x1f\x7f-\x9f]/g, " ");
@@ -350,7 +355,10 @@ export class Dashboard {
       }
       add([dim("elab/s: richieste elaborate dai preset, non tutto il traffico proxy")]);
       add([dim("Risparmio: somma dei delta misurati per stadio; basi non sommabili")]);
-      add([dim("Errori preset != errori upstream; latenza e richieste in corso non misurate")]);
+      add([dim("Errori preset != errori upstream; nessun conteggio globale delle richieste in corso")]);
+      add([dim("Tempi: proxy = preset; header = invio upstream -> header (non primo token)")]);
+      add([dim("Totale HTTP include upload, interceptor e streaming fino a fine invio/chiusura")]);
+      add([dim("WS: solo tempo preset; attesa esito non implica che la richiesta sia ancora attiva")]);
     }
     return lines.map(line => clip(line, width));
   }
@@ -375,9 +383,23 @@ export class Dashboard {
     const unmeasured = partial && stages.every(stage => !Number.isFinite(stage.saved));
     const status = event.error ? red(bold("errore preset")) : event.changed === true ? green("modificata")
       : event.changed === false ? dim("invariata") : dim("esito non disponibile");
+    const timing = event.timings;
+    const responseState = {
+      waiting: dim("attesa esito"), responding: cyan("risposta iniziata"),
+      error: red(event.error ? "non inoltrata" : "errore proxy/trasporto"), aborted: yellow("interrotta"),
+    }[timing?.state];
     const lines = wrapCells([gray(time), cyan(plain(event.transport)), magenta(plain(event.model, "?")),
       plain(event.preset), status,
       ...(event.error ? [] : [savedTokens(unmeasured ? null : event.saved) + (partial && !unmeasured ? yellow(" (parziale)") : "")]),
+      ...(timing ? [
+        `proxy: ${duration(timing.presetMs)}`,
+        ...(event.transport === "HTTP" ? [
+          `header: ${duration(timing.upstreamHeadersMs)}`, `tot: ${duration(timing.totalMs)}`,
+          ...(Number.isInteger(timing.statusCode) && timing.statusCode >= 100 && timing.statusCode <= 599
+            ? [timing.statusCode >= 400 ? red(`HTTP ${timing.statusCode}`) : `HTTP ${timing.statusCode}`] : []),
+          ...(responseState ? [responseState] : []),
+        ] : [dim("risposta WS: n/d")]),
+      ] : [dim("tempi: n/d")]),
       ...(event.project ? [`progetto: ${plain(event.project)}`] : []),
       ...(event.sessionId || event.threadId ? [`sessione: ${plain(event.sessionId || event.threadId)}`] : []),
       ...(!this.showPipelineDetails ? stages.map(s => dim(`${plain(s.name)}: ${plain(s.reason)}`)) : []),

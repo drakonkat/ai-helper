@@ -197,11 +197,33 @@ upgrade, restart the proxy and reopen the updated dashboard; a source checkout
 can be run directly with `node bin/cli.js status --ui` to avoid an older global
 installation taking precedence on PATH.
 
+Request timings use a monotonic clock and appear on new events:
+
+- `proxy`: preset processing, including request decompression and serialization,
+  but excluding client upload, custom interceptors and forwarding.
+- `header`: time from dispatching the upstream HTTP request to receiving its
+  response headers, including connection setup and upstream request upload.
+  This is **not** time to first model token; SSE headers can arrive before output.
+- `tot`: time from receiving the client's HTTP request headers until the proxy
+  finishes sending the response (or the connection fails/closes). Includes client
+  upload, preset/interceptor work, upstream waiting and streaming/downstream
+  backpressure; it does not confirm delivery to the client application.
+
+HTTP/SSE entries also show the upstream HTTP status and incomplete/error states.
+The existing event is updated without counting another request. A pending state
+only means no completion was recorded (for example after a proxy crash), not a
+global count of active calls. Updates do not bring evicted events back into the
+bounded recent list. WebSocket events report **only preset time**: connection
+duration and arbitrary response frames cannot safely be attributed to individual
+calls. Missing/older timings remain `n/d`. Error responses that arrive normally
+(such as HTTP 500) retain their status; a transport failure is marked separately
+from a preset error. Preset `none` remains unrecorded.
+
 Press **`d`** for source/configuration details and per-stage
 before/after token counts, percentages and measurement methods. Unknown savings
 remain unknown; partial estimates and token increases are explicitly marked.
-The panels do not infer provider cache savings, costs, upstream latency or
-active requests. Preset `none` and interceptor-only traffic are not recorded.
+The panels do not infer provider cache savings, costs, model-only latency or
+active request counts. Preset `none` and interceptor-only traffic are not recorded.
 
 A running process is not a health check, and the final upstream is not monitored.
 Snapshot read time is separate from last-event time: an idle proxy is not stale

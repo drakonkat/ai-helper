@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { performance } from "node:perf_hooks";
 import WebSocket, { WebSocketServer } from "ws";
 import { normalizePresetOptions, createPresetHooks } from "./proxy-presets.js";
 
@@ -121,7 +122,7 @@ export async function startProxy(options) {
     response.end(error.statusCode === 413 ? "Request body too large\n" : "Proxy request failed\n");
   }
 
-  async function relayResponse(incoming, response, request) {
+  async function relayResponse(incoming, response, request, onFailure = error => fail(response, error)) {
     const context = { request, statusCode: incoming.statusCode, headers: { ...incoming.headers } };
     try {
       await hooks.onResponse?.(context);
@@ -161,32 +162,69 @@ export async function startProxy(options) {
         await pipeline(incoming, response);
       }
     } catch (error) {
-      fail(response, error);
+      onFailure(error);
       incoming.destroy();
     }
   }
 
   const server = http.createServer(async (request, response) => {
+    const started = performance.now();
     let upstream;
-    response.on("close", () => upstream?.destroy());
-    request.on("error", error => { upstream?.destroy(); fail(response, error); });
+    let context;
+    let finished = false;
+    let failed = false;
+    const timings = { state: "waiting" };
+    const elapsed = since => Math.round((performance.now() - since) * 10) / 10;
+    const publishTiming = () => {
+      // Optional recorder updater: never emit a second preset event or disrupt traffic.
+      try { context?.updateTiming?.(timings); } catch {}
+    };
+    const finishTiming = state => {
+      if (finished) return;
+      finished = true;
+      timings.state = state;
+      timings.totalMs = elapsed(started);
+      publishTiming();
+    };
+    const failRequest = error => { failed = true; fail(response, error); };
+    response.once("finish", () => finishTiming(failed ? "error" : "completed"));
+    response.once("close", () => {
+      finishTiming(failed ? "error" : "aborted");
+      upstream?.destroy();
+    });
+    request.on("error", error => { upstream?.destroy(); failRequest(error); });
     try {
-      const context = requestContext(request);
+      context = requestContext(request);
       if (hooks.onRequest) {
         context.body = await readBody(request, config.maxBodyBytes);
         await hooks.onRequest(context);
         context.body = bytes(context.body);
         if (context.body.length > config.maxBodyBytes) throw Object.assign(new Error("Modified request body exceeds maxBodyBytes"), { statusCode: 413 });
       }
+      // A disconnect may have happened while the preset was still processing.
+      publishTiming();
       if (response.destroyed) return;
       const headers = headersForHop(context.headers);
       headers.host = target.host;
       if (context.body !== undefined) headers["content-length"] = String(context.body.length);
       else if (context.headers.trailer) headers.trailer = context.headers.trailer;
+      const sentAt = performance.now();
       upstream = (target.protocol === "https:" ? https : http).request(target, {
         method: context.method, path: upstreamPath(context.path), headers,
-      }, incoming => { void relayResponse(incoming, response, context); });
-      upstream.on("error", error => fail(response, error));
+      }, incoming => {
+        // Mark upstream truncation before pipeline destroys the downstream response.
+        incoming.once("aborted", () => { failed = true; });
+        incoming.once("error", () => { failed = true; });
+        if (!finished) {
+          // Header arrival is observable without consuming/buffering SSE body chunks.
+          timings.upstreamHeadersMs = elapsed(sentAt);
+          timings.statusCode = incoming.statusCode;
+          timings.state = "responding";
+          publishTiming();
+        }
+        void relayResponse(incoming, response, context, failRequest);
+      });
+      upstream.on("error", failRequest);
       request.on("aborted", () => upstream.destroy());
       if (context.body !== undefined) upstream.end(context.body);
       else {
@@ -195,7 +233,8 @@ export async function startProxy(options) {
       }
     } catch (error) {
       upstream?.destroy();
-      fail(response, error);
+      failRequest(error);
+      publishTiming();
     }
   });
   // Long-lived SSE streams must not expire between model events.

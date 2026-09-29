@@ -4,6 +4,17 @@ All notable changes to **`ai-helper` (`aih`)** are documented in this file.
 
 ---
 
+## [1.2.10] - 2026-09-29
+
+### Added
+- Show preset processing time, upstream response-header latency, total HTTP/SSE duration, upstream status and interrupted/failed responses in the live request stream. WebSocket events report preset time only.
+- Regression coverage for streaming, concurrent requests, transport failures, cancellation and timing persistence without duplicate counters.
+
+### Fixed
+- Close parent log descriptors after spawning detached services and allow cold Windows process discovery to finish in CI.
+
+---
+
 ## [1.2.9] - 2026-09-29
 
 ### Added

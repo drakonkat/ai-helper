@@ -22,6 +22,18 @@ export function createProxyStatsRecorder(file = getProxyStatsPath()) {
   const stats = readProxyStats(file) || { version: 1, since: new Date().toISOString(), requests: 0,
     changed: 0, errors: 0, estimatedSavedTokens: 0, unmeasuredStages: 0, stages: {}, recent: [] };
   let warned = false;
+  const warn = error => {
+    if (!warned) console.error(`[aih stats] Cannot save statistics: ${error.message}`);
+    warned = true;
+  };
+  const save = () => {
+    try {
+      mkdirSync(dirname(file), { recursive: true });
+      const temporary = `${file}.${process.pid}.tmp`;
+      writeFileSync(temporary, JSON.stringify(stats) + "\n");
+      renameSync(temporary, file);
+    } catch (error) { warn(error); }
+  };
   return event => {
     try {
       stats.updatedAt = new Date().toISOString();
@@ -39,19 +51,21 @@ export function createProxyStatsRecorder(file = getProxyStatsPath()) {
       }
       stats.estimatedSavedTokens += saved;
       const model = String(event.model).replace(/[\r\n]/g, " ").slice(0, 128);
-      stats.recent.push({ at: stats.updatedAt, model, preset: event.preset, transport: event.transport,
+      const recent = { at: stats.updatedAt, model, preset: event.preset, transport: event.transport,
         changed: event.changed, error: Boolean(event.error), saved: event.error ? null : saved,
-        sessionId: event.sessionId, threadId: event.threadId, project: event.project, stages });
+        sessionId: event.sessionId, threadId: event.threadId, project: event.project,
+        ...(event.timings ? { timings: { ...event.timings } } : {}), stages };
+      stats.recent.push(recent);
       stats.recent = stats.recent.slice(-20);
-      mkdirSync(dirname(file), { recursive: true });
-      const temporary = `${file}.${process.pid}.tmp`;
-      writeFileSync(temporary, JSON.stringify(stats) + "\n");
-      renameSync(temporary, file);
+      save();
       console.log(`[aih stats] ${event.transport} ${model} ${event.preset}: ${event.error ? "processing failed" : stages.map(s => `${s.name}=${s.saved ?? "?"} (${s.reason})`).join(", ") + `; estimated saved=${saved} tokens`}`);
-    } catch (error) {
-      if (!warned) console.error(`[aih stats] Cannot save statistics: ${error.message}`);
-      warned = true;
-    }
+      // Update this entry, never recount a request or resurrect an evicted entry.
+      return timings => {
+        if (!stats.recent.includes(recent)) return;
+        recent.timings = { ...recent.timings, ...timings };
+        save();
+      };
+    } catch (error) { warn(error); }
   };
 }
 

@@ -126,7 +126,9 @@ describe("native proxy pipeline dashboard", () => {
     expect(result).toContain("non tutto il traffico proxy");
     expect(result).toContain("somma dei delta misurati per stadio; basi non sommabili");
     expect(result).toContain("Errori preset != errori upstream");
-    expect(result).toContain("latenza e richieste in corso non misurate");
+    expect(result).toContain("nessun conteggio globale delle richieste in corso");
+    expect(result).toContain("header (non primo token)");
+    expect(result).toContain("WS: solo tempo preset");
     d.onKey("d");
     expect(d.showPipelineDetails).toBe(false);
     expect(output(d)).not.toContain("Fonte:");
@@ -238,6 +240,30 @@ describe("native request stream", () => {
     expect(result).not.toMatch(/savings_events|\.headroom|\$|efficienza|cache \d|ms/);
     const failed = text(d.requestLines(d.events[2], 160));
     expect(failed).not.toMatch(/tok|non misurato|parziale/);
+  });
+
+  it("shows timing units, HTTP outcomes and unknown legacy/WS timings within the terminal width", () => {
+    const d = fixture();
+    const event = request({ timings: { presetMs: 125, upstreamHeadersMs: 1500, totalMs: 5250, statusCode: 503, state: "completed" } });
+    const result = text(d.requestLines(event, 160));
+    for (const value of ["proxy: 125ms", "header: 1.5s", "tot: 5.3s", "HTTP 503"]) expect(result).toContain(value);
+    expect(text(d.requestLines(request(), 160))).toContain("tempi: n/d");
+    const ws = text(d.requestLines(request({ transport: "WS", timings: { presetMs: 0 } }), 160));
+    expect(ws).toContain("proxy: 0ms");
+    expect(ws).toContain("risposta WS: n/d");
+    expect(ws).not.toContain("tot:");
+    for (const [state, label] of Object.entries({ waiting: "attesa esito", responding: "risposta iniziata", error: "errore proxy/trasporto", aborted: "interrotta" })) {
+      const pending = request({ timings: { presetMs: 0, state } });
+      const rendered = text(d.requestLines(pending, 160));
+      expect(rendered).toContain(label);
+      expect(rendered).toContain("header: n/d");
+      expect(rendered).toContain("tot: n/d");
+    }
+    for (const width of [40, 80, 160]) {
+      expect(d.requestLines(event, width).map(stripAnsi).every(line => line.length <= width)).toBe(true);
+    }
+    const invalid = text(d.requestLines(request({ timings: { presetMs: -1, upstreamHeadersMs: NaN, totalMs: Infinity } }), 160));
+    expect(invalid).not.toMatch(/NaN|Infinity|-1ms/);
   });
 
   it("exposes before/after, method and percentage only within each stage in detail mode", () => {
