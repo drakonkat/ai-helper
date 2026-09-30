@@ -4,6 +4,7 @@ import zlib from "node:zlib";
 import { performance } from "node:perf_hooks";
 import { tokenStage } from "./proxy-stats.js";
 import { requestImages } from "./request-images.js";
+import { createPxpipePool } from "./pxpipe-pool.js";
 
 // Fixed recipes; the user's --interceptor runs afterwards and can inspect/edit the result.
 const PRESETS = ["none", "pxpipe", "headroom", "rtk", "headroom-pxpipe", "rtk-pxpipe", "rtk-headroom-pxpipe"];
@@ -79,12 +80,13 @@ function rtkPipe(text, filter, limit) {
 
 export async function createPresetHooks(config, onStats = () => {}) {
   if (!config.preset || config.preset === "none") return {};
-  const { countTokens: tokenize } = await import("gpt-tokenizer/encoding/o200k_base");
+  const { countTokens: tokenize } = config.preset.startsWith("rtk") ? await import("gpt-tokenizer/encoding/o200k_base") : {};
   function countTokens(text) {
     try { return tokenize(text, { disallowedSpecial: new Set() }); }
     catch { return NaN; } // Observability must not reject an otherwise valid request.
   }
-  const px = config.preset.includes("pxpipe") ? await import("pxpipe-proxy") : null;
+  const px = config.preset.includes("pxpipe") ? await import("pxpipe-proxy/applicability") : null;
+  const pool = px ? createPxpipePool(config.maxBodyBytes) : null;
   const models = config.models?.split(",");
   const wsModels = new WeakMap();
   const warnedEncodings = new Set();
@@ -139,6 +141,7 @@ export async function createPresetHooks(config, onStats = () => {}) {
     const bypassPxpipe = px && config.pxpipeNativeImages === "bypass" && requestImages(body, { identities: false }).length > 0;
     let changed = false;
     const stages = [];
+    let pxpipeTimings = {};
     const report = error => {
       // Observability must never interrupt proxy traffic; no request bodies are passed to the recorder.
       // Optional correlation only; never pass headers or bodies to the recorder.
@@ -154,7 +157,7 @@ export async function createPresetHooks(config, onStats = () => {}) {
       } catch {}
       try {
         const update = onStats({ model, preset: config.preset, transport: websocket ? "WS" : "HTTP", changed, stages, error,
-          timings: { presetMs: Math.round((performance.now() - started) * 10) / 10 },
+          timings: { presetMs: Math.round((performance.now() - started) * 10) / 10, ...pxpipeTimings },
           ...source, ...(requestId ? { requestId } : {}) });
         // ponytail: WS measures presets only; response timings need per-response-ID correlation.
         if (!websocket && typeof update === "function") context.updateTiming = update;
@@ -187,28 +190,14 @@ export async function createPresetHooks(config, onStats = () => {}) {
         stages.push(tokenStage("pxpipe", 0, 0, false, "native_images_present", "pxpipe_estimate"));
       } else if (px && (models ? models.some(m => m.endsWith("*") ? model.startsWith(m.slice(0, -1)) : model === m) : px.isPxpipeSupportedModel(model) || px.isPxpipeSupportedGptModel(model))) {
         const bytes = Buffer.from(JSON.stringify({ ...body, model }));
-        const options = { model };
-        const result = await (format === "anthropic" ? px.transformRequest(bytes, options)
-          : format === "chat" ? px.transformOpenAIChatCompletions(bytes, options) : px.transformOpenAIResponses(bytes, options));
-        const info = result.info || {};
-        let before = 0, after = 0, method = "pxpipe_estimate";
-        if (info.compressed) {
-          before = info.baselineImagedTokens;
-          after = Number.isFinite(info.imageTokens) ? info.imageTokens + (info.nativeInjectedTokens ?? 0) : undefined;
-          if (!Number.isFinite(before) || !Number.isFinite(after)) {
-            // Anthropic's transformer lacks token totals: count text locally and include newly rendered images.
-            const textTokens = value => countTokens(JSON.stringify(value, (key, item) =>
-              ["image", "input_image", "image_url"].includes(item?.type) || key === "encrypted_content" ? undefined : item));
-            before = textTokens(JSON.parse(bytes));
-            let imageTokens;
-            try { imageTokens = info.imageDims?.reduce((sum, d) => sum + px.openAIVisionTokens(model, d.width, d.height), 0); } catch {}
-            after = Number.isFinite(imageTokens) ? textTokens(JSON.parse(Buffer.from(result.body))) + imageTokens : undefined;
-            method = "o200k_and_vision_estimate";
-          }
-        }
-        stages.push(tokenStage("pxpipe", before, after, Boolean(info.compressed),
-          info.compressed ? "applied" : String(info.reason || "unchanged").split(/[^a-z_]/i)[0].slice(0, 40), method));
-        if (result.info?.compressed) {
+        let sessionId;
+        try { sessionId = JSON.parse(context.headers?.["x-codex-turn-metadata"] || "{}").session_id; } catch {}
+        const result = await pool.run({ body: bytes, format, model }, {
+          sessionId: typeof sessionId === "string" ? sessionId : undefined, signal: context.signal,
+        });
+        pxpipeTimings = Object.fromEntries(Object.entries(result.timings).map(([key, value]) => [key, Math.round(value * 10) / 10]));
+        stages.push(result.stage);
+        if (result.stage.applied) {
           const transformed = JSON.parse(Buffer.from(result.body).toString("utf8"));
           if (!Object.hasOwn(body, "model")) delete transformed.model;
           // Only replace the AI request, preserving a WebSocket event's outer fields.
@@ -222,10 +211,11 @@ export async function createPresetHooks(config, onStats = () => {}) {
       const output = changed ? Buffer.from(JSON.stringify(envelope)) : raw;
       report(false);
       return output;
-    } catch (error) { report(true); throw error; }
+    } catch (error) { report(!context.signal?.aborted); throw error; }
   }
 
   return {
+    close: () => pool?.close(),
     async onRequest(context) {
       const started = performance.now();
       if (context.method !== "POST" || !/\bapplication\/(?:[\w.-]+\+)?json\b/i.test(String(context.headers["content-type"] || ""))) return;

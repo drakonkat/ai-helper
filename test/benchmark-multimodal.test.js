@@ -180,6 +180,7 @@ test("bypass decision is captured before Headroom and only skips pxpipe", async 
   t.after(() => { server.closeAllConnections(); return new Promise(done => server.close(done)); });
   const events = [], config = normalizeProxyOptions({ upstream: "http://127.0.0.1:1", preset: "headroom-pxpipe", pxpipeNativeImages: "bypass", models: "gpt-5.5", headroomUrl: `http://127.0.0.1:${server.address().port}` });
   const hooks = await createPresetHooks(config, e => events.push(e));
+  t.after(() => hooks.close());
   const original = { model: "gpt-5.5", messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: "https://example.invalid/a.png" } }, { type: "text", text: "Inspect image" }] }] };
   const context = { method: "POST", path: "/v1/chat/completions", headers: { "content-type": "application/json" }, body: Buffer.from(JSON.stringify(original)) };
   await hooks.onRequest(context);

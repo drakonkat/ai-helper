@@ -4,6 +4,18 @@ All notable changes to **`ai-helper` (`aih`)** are documented in this file.
 
 ---
 
+## [1.2.12] - 2026-09-30
+
+### Fixed
+- Exclude opaque reasoning, compaction and media from pxpipe's diagnostic token counts, retaining forwarded payloads and reporting partial counts explicitly. Apply the version-checked correction on installation and standalone builds.
+- Run pxpipe transformations and token estimates in up to two persistent CPU workers so heavy requests cannot block HTTP/SSE or excluded models. Bound waiting work, cancel disconnected requests, recover from worker crashes and close workers on shutdown.
+
+### Added
+- Show worker queue, processing, supported thread CPU and sampled event-loop delay separately in the request stream.
+- Regression checks for opaque payload preservation, excluded-model responsiveness, bounded queues, cancellation, crash recovery and shutdown.
+
+---
+
 ## [1.2.11] - 2026-09-30
 
 ### Changed

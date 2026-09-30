@@ -1,10 +1,17 @@
 import { resolve } from "node:path";
+import { patchPxpipe } from "./patch-pxpipe.js";
 
 // Embed a Node worker so the compiled CLI uses the same proxy transport as npm.
 const root = resolve(import.meta.dir, "..");
 const outfile = process.argv[2] || resolve(root, "dist", process.platform === "win32" ? "aih.exe" : "aih");
+patchPxpipe();
+const thread = await Bun.build({
+  entrypoints: [resolve(root, "src/pxpipe-thread.js")], target: "node", format: "esm", minify: true,
+});
+if (!thread.success) throw new AggregateError(thread.logs, "Pxpipe thread build failed");
 const worker = await Bun.build({
   entrypoints: [resolve(root, "src/proxy-worker.js")], target: "node", format: "esm", minify: true,
+  define: { AIH_PXPIPE_THREAD_SOURCE: JSON.stringify(await thread.outputs[0].text()) },
 });
 if (!worker.success) throw new AggregateError(worker.logs, "Proxy worker build failed");
 const result = await Bun.build({

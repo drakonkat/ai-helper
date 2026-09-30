@@ -43,4 +43,4 @@ jobs:
 
       - name: Run Proxy Tests (Node)
         if: matrix.runtime != 'bun'
-        run: node --test test/proxy.test.js
+        run: node --test test/proxy.test.js test/pxpipe-performance.test.js

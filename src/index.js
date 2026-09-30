@@ -73,6 +73,7 @@ ${bold("PROXY OPTIONS (start/up/restart proxy):")}
   ${gray("--interceptor <file.mjs>")} JavaScript hooks loaded at startup; quote paths with spaces
   ${gray("--preset <name>")}         pxpipe | headroom | rtk | headroom-pxpipe | rtk-pxpipe |
                             rtk-headroom-pxpipe | none (fresh default: none)
+                            pxpipe runs in up to 2 persistent workers; excluded models skip the queue
   ${gray("--headroom-url <url>")}     Headroom service (default: http://127.0.0.1:8787)
   ${gray("--rtk-filter <name>")}      Fixed rtk pipe filter; --rtk-filter= restores auto-detection
   ${gray("--max-body-bytes <num>")}   Positive integer; buffered request / WebSocket limit

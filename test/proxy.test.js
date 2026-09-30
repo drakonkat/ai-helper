@@ -77,10 +77,11 @@ test("validates proxy options and accepts the abbreviated URL", () => {
 const denseInstructions = Array.from({ length: 600 }, (_, i) => `Rule ${i}: inspect function config_${i}(value) and preserve identifier component_${i}; validate errors with status=${400 + i % 100}.`).join("\n");
 const aiBody = () => ({ model: "gpt-5.5", instructions: denseInstructions, input: [{ role: "user", content: "Check the code" }] });
 
-test("pxpipe preset uses the real library, gates models, and preserves WS envelopes/model inheritance", { timeout: 15000 }, async () => {
+test("pxpipe preset uses the real library, gates models, and preserves WS envelopes/model inheritance", { timeout: 15000 }, async t => {
   const config = normalizeProxyOptions({ upstream: "http://localhost:10100", preset: "pxpipe", models: "gpt-5.5*" });
   const measurements = [];
   const hooks = await createPresetHooks(config, event => measurements.push(event));
+  t.after(() => hooks.close());
   const original = aiBody();
   const expected = await transformOpenAIResponses(Buffer.from(JSON.stringify(original)), { model: original.model });
   assert.equal(expected.info.compressed, true);
@@ -117,7 +118,8 @@ test("pxpipe preset uses the real library, gates models, and preserves WS envelo
   assert.equal(measurements[1].stages[0].reason, "model_excluded");
   assert.ok(measurements.every(event => Number.isFinite(event.timings.presetMs) && event.timings.presetMs >= 0));
   assert.equal(request.updateTiming, undefined); // A WS connection is not a single response.
-  assert.deepEqual(Object.keys(measurements.at(-1).timings), ["presetMs"]);
+  assert.ok(measurements.at(-1).timings.pxpipeQueueMs >= 0);
+  assert.ok(measurements.at(-1).timings.pxpipeMs >= 0);
 });
 
 test("timing updates persist out of order without recounting or resurrecting evicted requests", async t => {
@@ -287,6 +289,7 @@ test("Zstandard requests produce stats for Astra/AGY and preserve bytes when exc
   const events = [];
   const config = normalizeProxyOptions({ upstream: "http://localhost:10100", preset: "pxpipe", models: "gpt-6-astra,google-antigravity/gemini-3.8*" });
   const hooks = await createPresetHooks(config, event => events.push(event));
+  t.after(() => hooks.close());
   for (const model of ["gpt-6-astra", "google-antigravity/gemini-3.8-flash", "other-model"]) {
     const raw = zlib.zstdCompressSync(Buffer.from(JSON.stringify({ ...aiBody(), model })));
     const context = { method: "POST", path: "/v1/responses", headers: { "content-type": "application/json", "content-encoding": "zstd" }, body: raw };
@@ -306,6 +309,7 @@ test("Zstandard requests produce stats for Astra/AGY and preserve bytes when exc
     }
   }
   const limited = await createPresetHooks({ ...config, maxBodyBytes: 32 });
+  t.after(() => limited.close());
   await assert.rejects(limited.onRequest({ method: "POST", path: "/v1/responses", headers: { "content-type": "application/json", "content-encoding": "zstd" }, body: zlib.zstdCompressSync(Buffer.alloc(1024)) }));
 });
 
@@ -638,6 +642,12 @@ test("buffer limit returns 413, and invalid interceptor fails before listening",
   assert.equal((await request(proxy.url, { method: "POST" }, "12345")).status, 413);
   assert.equal((await request(proxy.url, { method: "POST" }, "1234")).status, 200);
   await assert.rejects(startProxy({ upstream: "http://127.0.0.1:10100", interceptor: join(dir, "missing.mjs") }));
+});
+
+test("proxy bind failure cleans up and close is idempotent", async t => {
+  const {proxy} = await fixture(t, (_req, res) => res.end("ok"), {preset: "pxpipe", models: "gpt-6-astra"});
+  await assert.rejects(startProxy({upstream: "http://127.0.0.1:1", listen: proxy.url, preset: "pxpipe"}), {code: "EADDRINUSE"});
+  await Promise.all([proxy.close(), proxy.close()]);
 });
 
 test("CLI backgrounds, reports readiness, saves options, restarts and stops only its proxy", { timeout: 60000 }, async t => {

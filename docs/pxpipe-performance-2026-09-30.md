@@ -1,5 +1,9 @@
 # Profilazione pxpipe — 30 settembre 2026
 
+**Aggiornamento aih 1.2.12:** gli interventi sul conteggio diagnostico e sui worker
+sono ora integrati. Le sezioni sperimentali sotto conservano le misure originali;
+il nuovo controllo di produzione è descritto in fondo.
+
 Il progetto usava `pxpipe-proxy` **0.13.2**. È stato aggiornato a **0.14.0** in
 `package.json`, `package-lock.json`, `bun.lock` e nell'installazione locale.
 La build standalone è stata ricompilata con la nuova dipendenza.
@@ -203,3 +207,44 @@ privilegi; nel controllo locale la terminazione è stata negata con `Access is d
 Fonti primarie: [release pxpipe 0.14.0](https://github.com/teamchong/pxpipe/releases/tag/v0.14.0),
 [Node.js 22: worker thread e pool persistenti](https://nodejs.org/docs/latest-v22.x/api/worker_threads.html).
 Le misure e le conclusioni prestazionali sopra derivano dai profili locali.
+
+## Integrazione in aih 1.2.12
+
+L'installazione e la build applicano automaticamente una correzione controllata
+per pxpipe 0.14.0. La sola copia diagnostica esclude reasoning cifrato, compaction
+opaca e media, anche serializzati nel JSON di un output tool. Le metriche espongono
+`responsesComposition.partial` e `excludedBytes`; la richiesta trasformata non
+viene privata di questi dati. La correzione è idempotente e rifiuta versioni o
+target diversi, così un aggiornamento della dipendenza richiede una revisione.
+
+Il proxy usa al massimo due worker persistenti, avviati al primo lavoro e
+assegnati stabilmente per sessione. I modelli esclusi evitano la coda. Al massimo
+32 richieste e `maxBodyBytes` di input possono attendere; oltre il limite viene
+restituito HTTP 503. Una disconnessione elimina il lavoro in coda oppure termina
+e sostituisce il worker attivo. La chiusura del proxy termina tutti i worker.
+La build standalone incorpora separatamente anche il codice dei thread.
+
+Il nuovo probe usa la medesima fixture Responses con 256 KiB ripetitivi e confronta
+gli SHA-256 con il risultato 0.14.0 originale già registrato:
+
+| Modello / stato | Tempo totale preset | Tempo nel worker | Coda / avvio worker |
+|---|---:|---:|---:|
+| Claude / primo uso | 1.026 ms | 406 ms | 612 ms |
+| Astra / primo uso | 1.016 ms | 418 ms | 591 ms |
+| Claude / cache calda | 171 ms | 167 ms | 0 ms |
+| Astra / cache calda | 186 ms | 181 ms | 0 ms |
+
+I due primi usi sono concorrenti, con cache indipendenti. Gli output coincidono
+con quelli originali in tutti e quattro i confronti. Sol escluso passa in 0,6 ms;
+il ritardo massimo del timer principale è 11,1 ms. Queste misure singole e
+sintetiche non garantiscono la latenza del traffico reale né quella del provider.
+
+Il dashboard mostra separatamente `coda`, `pxpipe`, CPU del thread quando
+supportata da Node e `loop max`: quest'ultimo è il massimo ritardo campionato del
+thread principale dall'evento preset precedente, condiviso tra le richieste.
+
+Verifica ripetibile nel repository: `node --test test/pxpipe-performance.test.js`.
+I nuovi test controllano anche output identici prima/dopo la correzione, media
+nativi, compaction, Sol escluso durante due lavori CPU, coda limitata, cancellazione,
+crash e chiusura. La suite completa e il test CLI standalone sono passati.
+Il probe e `optimized-production.json` rimangono negli artefatti locali ignorati.

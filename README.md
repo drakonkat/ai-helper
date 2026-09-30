@@ -324,6 +324,28 @@ does not update an older aih installation or standalone binary. See the
 [offline CPU profiling report](docs/pxpipe-performance-2026-09-30.md) for measured
 tokenization costs and worker-thread experiments.
 
+Pxpipe transformations and their token estimates run in up to **two persistent
+CPU workers**. Excluded models bypass the worker queue; HTTP and SSE streaming
+remain on the main thread. Sessions have stable worker affinity to reuse caches.
+The queue is limited to 32 waiting requests and `--max-body-bytes` of waiting
+input; overload returns HTTP 503. Disconnecting cancels queued work or terminates
+and replaces the active worker. Shutdown closes both workers.
+
+Installation applies a version-checked correction to pxpipe 0.14.0: diagnostic
+composition counts exclude encrypted reasoning, opaque compaction and media data,
+including JSON-serialized tool media. Forwarded payloads keep these values intact.
+`responsesComposition.partial` and `excludedBytes` identify incomplete diagnostic
+counts. Lifecycle scripts must be enabled for this correction; standalone builds
+include it automatically. Dependency upgrades require reviewing the correction.
+
+The request stream separates total preset time (`proxy`), worker queue time
+(`coda`), transformation time (`pxpipe`) and, on supporting Node versions, worker
+CPU time (`CPU`). Header and total response times retain their existing meaning;
+worker isolation does not shorten provider generation time.
+`loop max` is the maximum sampled main-thread scheduling delay since the preceding
+preset event beyond the 20 ms sampling interval, shared across requests. Queue
+time includes cold worker startup.
+
 Pass `--models` to `aih start` (or `aih up`) to override the proxy's model list:
 
 ```bash

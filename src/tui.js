@@ -393,6 +393,11 @@ export class Dashboard {
       ...(event.error ? [] : [savedTokens(unmeasured ? null : event.saved) + (partial && !unmeasured ? yellow(" (parziale)") : "")]),
       ...(timing ? [
         `proxy: ${duration(timing.presetMs)}`,
+        ...(Number.isFinite(timing.pxpipeQueueMs) ? [
+          `coda: ${duration(timing.pxpipeQueueMs)}`, `pxpipe: ${duration(timing.pxpipeMs)}`,
+          ...(Number.isFinite(timing.pxpipeCpuMs) ? [`CPU: ${duration(timing.pxpipeCpuMs)}`] : []),
+        ] : []),
+        ...(Number.isFinite(timing.eventLoopLagMs) ? [`loop max: ${duration(timing.eventLoopLagMs)}`] : []),
         ...(event.transport === "HTTP" ? [
           `header: ${duration(timing.upstreamHeadersMs)}`, `tot: ${duration(timing.totalMs)}`,
           ...(Number.isInteger(timing.statusCode) && timing.statusCode >= 100 && timing.statusCode <= 599

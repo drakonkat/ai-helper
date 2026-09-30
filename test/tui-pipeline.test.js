@@ -244,9 +244,9 @@ describe("native request stream", () => {
 
   it("shows timing units, HTTP outcomes and unknown legacy/WS timings within the terminal width", () => {
     const d = fixture();
-    const event = request({ timings: { presetMs: 125, upstreamHeadersMs: 1500, totalMs: 5250, statusCode: 503, state: "completed" } });
+    const event = request({ timings: { presetMs: 125, pxpipeQueueMs: 20, pxpipeMs: 100, pxpipeCpuMs: 80, eventLoopLagMs: 25, upstreamHeadersMs: 1500, totalMs: 5250, statusCode: 503, state: "completed" } });
     const result = text(d.requestLines(event, 160));
-    for (const value of ["proxy: 125ms", "header: 1.5s", "tot: 5.3s", "HTTP 503"]) expect(result).toContain(value);
+    for (const value of ["proxy: 125ms", "coda: 20ms", "pxpipe: 100ms", "CPU: 80ms", "loop max: 25ms", "header: 1.5s", "tot: 5.3s", "HTTP 503"]) expect(result).toContain(value);
     expect(text(d.requestLines(request(), 160))).toContain("tempi: n/d");
     const ws = text(d.requestLines(request({ transport: "WS", timings: { presetMs: 0 } }), 160));
     expect(ws).toContain("proxy: 0ms");

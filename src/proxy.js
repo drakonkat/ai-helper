@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { performance } from "node:perf_hooks";
+import { performance, monitorEventLoopDelay } from "node:perf_hooks";
 import WebSocket, { WebSocketServer } from "ws";
 import { normalizePresetOptions, createPresetHooks } from "./proxy-presets.js";
 
@@ -82,8 +82,16 @@ export async function startProxy(options) {
   for (const name of HOOKS) {
     if (hooks[name] !== undefined && typeof hooks[name] !== "function") throw new TypeError(`${name} must be a function`);
   }
-  const preset = await createPresetHooks(config, options.onStats);
+  const loopDelay = monitorEventLoopDelay({ resolution: 20 });
+  loopDelay.enable();
+  const preset = await createPresetHooks(config, event => {
+    // Process-wide maximum since the preceding preset event; never a request CPU duration.
+    event.timings.eventLoopLagMs = Math.max(0, Math.round((loopDelay.max / 1e6 - 20) * 10) / 10);
+    loopDelay.reset();
+    return options.onStats?.(event);
+  }).catch(error => { loopDelay.disable(); throw error; });
   for (const [name, hook] of Object.entries(preset)) {
+    if (name === "close") continue;
     const custom = hooks[name];
     hooks[name] = async context => { await hook(context); await custom?.(context); };
   }
@@ -174,6 +182,7 @@ export async function startProxy(options) {
     let finished = false;
     let failed = false;
     const timings = { state: "waiting" };
+    const cancellation = new AbortController();
     const elapsed = since => Math.round((performance.now() - since) * 10) / 10;
     const publishTiming = () => {
       // Optional recorder updater: never emit a second preset event or disrupt traffic.
@@ -189,12 +198,14 @@ export async function startProxy(options) {
     const failRequest = error => { failed = true; fail(response, error); };
     response.once("finish", () => finishTiming(failed ? "error" : "completed"));
     response.once("close", () => {
+      cancellation.abort();
       finishTiming(failed ? "error" : "aborted");
       upstream?.destroy();
     });
     request.on("error", error => { upstream?.destroy(); failRequest(error); });
     try {
       context = requestContext(request);
+      context.signal = cancellation.signal;
       if (hooks.onRequest) {
         context.body = await readBody(request, config.maxBodyBytes);
         await hooks.onRequest(context);
@@ -263,6 +274,9 @@ export async function startProxy(options) {
     socket.once("close", () => { if (!client) upstream?.terminate(); });
     try {
       const context = requestContext(request);
+      const cancellation = new AbortController();
+      context.signal = cancellation.signal;
+      socket.once("close", () => cancellation.abort());
       const headers = headersForHop(context.headers);
       for (const name of Object.keys(headers)) if (name.startsWith("sec-websocket-")) delete headers[name];
       headers.host = target.host;
@@ -336,17 +350,21 @@ export async function startProxy(options) {
       server.off("error", reject);
       resolveListen();
     });
-  });
+  }).catch(async error => { loopDelay.disable(); wsServer.close(); await preset.close?.(); throw error; });
   const address = server.address();
   const url = `http://${address.family === "IPv6" ? `[${address.address}]` : address.address}:${address.port}`;
+  let closing;
   return {
     url,
-    close: () => new Promise((resolveClose, reject) => {
+    close: () => {
+      loopDelay.disable();
+      return closing ||= Promise.all([preset.close?.(), new Promise((resolveClose, reject) => {
       for (const ws of upstreamSockets) ws.terminate();
       for (const ws of wsServer.clients) ws.terminate();
       for (const socket of connections) socket.destroy();
       wsServer.close();
       server.close(error => error ? reject(error) : resolveClose());
-    }),
+      })]).then(() => undefined);
+    },
   };
 }
