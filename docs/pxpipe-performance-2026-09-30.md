@@ -248,3 +248,55 @@ I nuovi test controllano anche output identici prima/dopo la correzione, media
 nativi, compaction, Sol escluso durante due lavori CPU, coda limitata, cancellazione,
 crash e chiusura. La suite completa e il test CLI standalone sono passati.
 Il probe e `optimized-production.json` rimangono negli artefatti locali ignorati.
+
+## Picchi residui: immagini nei risultati dei tool
+
+La profilazione successiva ha trovato un secondo percorso non coperto dalla
+correzione della composizione: `classifyResponsesPairs` in `openai-history.js`
+conta i token di ogni coppia call/output, anche se recente e mantenuta nativa.
+Un output contenente `input_image` viene serializzato integralmente e il base64
+passa a `gptCountTokens`. Lo stesso output può quindi essere conteggiato a ogni
+nuovo turno, pur essendo già escluso dalla diagnostica iniziale.
+
+Le metriche live prima dell'esclusione di Sol mostravano lavori CPU da
+42–148 secondi e lavori da 0,13–0,30 secondi che aspettavano 130–174 secondi
+nella stessa coda. Gli header upstream arrivavano in circa 1–3 secondi. Questi
+valori individuano un costo locale e il suo effetto sulle richieste concorrenti;
+non sono una distribuzione di latenza del provider.
+
+La correzione di aih 1.2.13 riconosce media nativi o serializzati, non ne tokenizza il payload
+nel planner e mantiene nativo l'intero round parallelo di tool. Il round continua
+a contare per la recenza e costituisce una barriera fra segmenti comprimibili.
+I round di solo testo continuano a essere compressi. È corretto anche il filtro
+diagnostico per un output JSON il cui oggetto radice è un'immagine.
+
+| Riproduzione offline, primo uso | Prima | Dopo |
+|---|---:|---:|
+| Output di tool con screenshot reale da 3,25 MB | 12.505 ms | 158 ms |
+| Output di tool con base64 ripetitivo da 128 KiB | 11.451 ms | 127 ms |
+
+Ogni riga è una singola osservazione con Inspector attivo, non un benchmark
+statistico. Nel caso reale il profilo prima della patch è dominato dallo stack
+`countNative → gptCountTokens → classifyResponsesPairs`. Gli SHA-256 dei payload
+in uscita coincidono prima e dopo in entrambi i casi recenti; gli output dei tool
+e le immagini sono conservati. Per i round media vecchi cambia intenzionalmente
+la selezione: restano nativi invece di essere convertiti in testo base64 renderizzato.
+L'esclusione di Sol configurata dall'utente resta attiva.
+
+I risultati e i profili senza payload sono in
+`benchmark-results/pxpipe-residual-2026-09-30/`. Il probe usa uno screenshot già
+presente nel rollout locale e non chiama provider. I test permanenti in
+`test/pxpipe-performance.test.js` coprono round vecchi/recenti, media serializzati,
+audio, round paralleli atomici e conservazione dell'output nel worker.
+
+La suite completa `npm test`, la build e il test CLI del binario standalone
+sono passati. La copia globale npm è stata patchata e verificata in un processo
+nuovo: il controllo sintetico Astra con 256 KiB di immagine ha completato in
+115 ms conservando l'output. Esiste un backup dei due file della dipendenza e
+dello script in `~/.aih/backups/pxpipe-media-20260930-141041/`.
+La correzione viene applicata da `postinstall` e dalla build standalone di aih
+1.2.13. Un proxy già avviato deve essere riavviato per ricaricare la libreria.
+Nel controllo locale Windows ha negato la terminazione del processo elevato
+con `Access is denied`: in questo caso `aih restart proxy --json` deve essere
+eseguito da una PowerShell con privilegi di amministratore.
+La configurazione è stata verificata dopo il tentativo: Sol rimane escluso.

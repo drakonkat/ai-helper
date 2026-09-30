@@ -7,7 +7,7 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { createPxpipePool } from "../src/pxpipe-pool.js";
 import { createPresetHooks } from "../src/proxy-presets.js";
-import { patchPxpipeSource } from "../scripts/patch-pxpipe.js";
+import { patchPxpipeSource, patchPxpipeHistorySource } from "../scripts/patch-pxpipe.js";
 import { transformOpenAIResponses } from "pxpipe-proxy";
 
 async function poolFixture(t, limit = 1024) {
@@ -123,4 +123,67 @@ test("256 KiB opaque stress transforms in a worker and retains the encrypted val
   cancellation.abort();
   await assert.rejects(hooks.onRequest({ ...context, signal: cancellation.signal }), {name: "AbortError"});
   assert.equal(events.at(-1).error, false, "Client cancellation is not a preset failure");
+});
+
+test("history treats media tool rounds as native barriers without tokenizing their payloads", { timeout: 10000 }, async () => {
+  const entry = pathToFileURL(fileURLToPath(import.meta.resolve("pxpipe-proxy")));
+  const file = new URL("openai-history.js", entry);
+  const source = await readFile(file, "utf8");
+  assert.equal(patchPxpipeHistorySource(source, "0.14.0"), source);
+  assert.throws(() => patchPxpipeHistorySource(source, "0.15.0"), /Review/);
+  assert.throws(() => patchPxpipeHistorySource("changed", "0.14.0"), /target changed/);
+  const { planResponsesPairCollapse } = await import(file.href);
+  const media = {type: "input_image", image_url: "data:image/png;base64," + "A".repeat(262144)};
+  const outputs = [[{type: "input_text", text: "screenshot"}, media], JSON.stringify(media),
+    JSON.stringify({content: [media]}), [{type: "input_audio", input_audio: {data: "B".repeat(262144)}}]];
+  for (const output of outputs) {
+    // A parallel round is atomic: even its textual sibling must stay native.
+    const items = [
+      {type: "function_call", call_id: "image", name: "inspect", arguments: "{}"},
+      {type: "function_call", call_id: "text", name: "read", arguments: "{}"},
+      {type: "function_call_output", call_id: "image", output},
+      {type: "function_call_output", call_id: "text", output: "Readable output. ".repeat(100)},
+    ];
+    const before = JSON.stringify(items);
+    const plan = await planResponsesPairCollapse(items, () => true, {keepRecentPairs: 0, minCollapseTokens: 1});
+    assert.deepEqual(plan.selectedIndices, []);
+    assert.equal(plan.pairState.completedPairs, 2);
+    assert.equal(plan.pairState.oldCompletedPairs, 2);
+    assert.equal(plan.pairState.imageableFunctionOutputTokens, 0);
+    assert.equal(plan.pairState.malformedItems, 0);
+    assert.equal(JSON.stringify(items), before);
+    const recent = await planResponsesPairCollapse(items, () => true, {keepRecentPairs: 2});
+    assert.equal(recent.pairState.recentCompletedPairs, 2);
+  }
+  const textItems = [{type: "function_call", call_id: "plain", name: "read", arguments: "{}"},
+    {type: "function_call_output", call_id: "plain", output: "Source identifiers and error checks. ".repeat(100)}];
+  const textPlan = await planResponsesPairCollapse(textItems, () => true, {keepRecentPairs: 0, minCollapseTokens: 1, maxImages: 20});
+  assert.deepEqual(textPlan.selectedIndices, [0, 1]);
+  assert.ok(textPlan.pairState.collapsedFunctionOutputTokens > 0);
+  const separated = [...textItems,
+    {type: "function_call", call_id: "image", name: "inspect", arguments: "{}"},
+    {type: "function_call_output", call_id: "image", output: [media]},
+    ...textItems.map(item => ({...item, call_id: "after"}))];
+  const barriers = await planResponsesPairCollapse(separated, () => true, {keepRecentPairs: 0, minCollapseTokens: 1, maxImages: 20});
+  assert.deepEqual(barriers.selectedIndices, [0, 1, 4, 5]);
+  assert.ok(barriers.segments.every(segment => segment.selectedIndices.every(index => index < 2)
+    || segment.selectedIndices.every(index => index > 3)), "No rendered segment may cross native media");
+});
+
+test("serialized root media diagnostics stay partial and the worker preserves the output", { timeout: 10000 }, async t => {
+  const hooks = await createPresetHooks({preset: "pxpipe", models: "gpt-6-astra", maxBodyBytes: 1024 * 1024}, () => {});
+  t.after(() => hooks.close());
+  const output = JSON.stringify({type: "input_image", image_url: "data:image/png;base64," + "A".repeat(262144)});
+  const body = {model: "gpt-6-astra", instructions: "Preserve errors and source identifiers. ".repeat(600), input: [
+    {role: "user", content: "Inspect"},
+    {type: "function_call", call_id: "image", name: "inspect", arguments: "{}"},
+    {type: "function_call_output", call_id: "image", output},
+  ]};
+  const raw = Buffer.from(JSON.stringify(body));
+  const result = await transformOpenAIResponses(raw, {model: body.model});
+  assert.ok(result.info.responsesComposition.excludedBytes >= 262144);
+  assert.ok(result.info.responsesComposition.functionOutputs < 100);
+  const context = {method: "POST", path: "/v1/responses", headers: {"content-type": "application/json"}, body: raw};
+  await hooks.onRequest(context);
+  assert.equal(JSON.parse(context.body).input.find(item => item.type === "function_call_output").output, output);
 });

@@ -4,6 +4,17 @@ All notable changes to **`ai-helper` (`aih`)** are documented in this file.
 
 ---
 
+## [1.2.13] - 2026-09-30
+
+### Fixed
+- Keep media-bearing Responses tool rounds native during history planning instead of tokenizing or rendering their base64 payloads. Preserve atomic parallel rounds, call IDs, recency and barriers between text history segments.
+- Filter JSON-serialized media at the root of diagnostic tool outputs and upgrade the existing 1.2.12 diagnostic patch during installation.
+
+### Added
+- Regression checks for old and recent media outputs, serialized images, audio, parallel rounds, text-history barriers and payload preservation in CPU workers.
+
+---
+
 ## [1.2.12] - 2026-09-30
 
 ### Fixed
