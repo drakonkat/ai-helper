@@ -4,6 +4,16 @@ All notable changes to **`ai-helper` (`aih`)** are documented in this file.
 
 ---
 
+## [1.2.11] - 2026-09-30
+
+### Changed
+- Upgrade the embedded `pxpipe-proxy` dependency from 0.13.2 to 0.14.0 and synchronize npm and Bun lockfiles.
+
+### Added
+- Document offline CPU profiling, opaque-data tokenization costs, and isolated worker-thread experiments. These experiments do not change production proxy processing.
+
+---
+
 ## [1.2.10] - 2026-09-29
 
 ### Added

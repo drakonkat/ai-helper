@@ -1,6 +1,6 @@
 {
   "name": "@drakonkat/ai-helper",
-  "version": "1.2.10",
+  "version": "1.2.11",
   "description": "Zero-config background service manager, auto-discovery daemon & dashboard launcher for AI agent ecosystems (pxpipe, ocx, agentmemory, headroom)",
   "main": "src/index.js",
   "module": "src/index.js",
@@ -15,6 +15,7 @@
     "scripts/build.js",
     "scripts/bench-proxy.js",
     "docs/benchmark.md",
+    "docs/pxpipe-performance-2026-09-30.md",
     "README.md",
     "LICENSE",
     "ARCHITECTURE.md",
@@ -62,7 +63,7 @@
   "license": "MIT",
   "dependencies": {
     "gpt-tokenizer": "3.4.0",
-    "pxpipe-proxy": "0.13.2",
+    "pxpipe-proxy": "0.14.0",
     "toml-eslint-parser": "1.0.3",
     "ws": "^8.21.3"
   }

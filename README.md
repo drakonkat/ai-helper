@@ -318,6 +318,12 @@ then the built-in proxy with these options:
 aih start proxy http://127.0.0.1:10100/ --listen http://127.0.0.1:10102 --preset pxpipe --models "gpt-6-astra,google-antigravity/gemini-3.8*,anthropic/claude-fable*"
 ```
 
+The built-in proxy uses the pinned `pxpipe-proxy` **0.14.0** library. Update aih
+to receive this embedded version; updating the separate global `pxpipe` command
+does not update an older aih installation or standalone binary. See the
+[offline CPU profiling report](docs/pxpipe-performance-2026-09-30.md) for measured
+tokenization costs and worker-thread experiments.
+
 Pass `--models` to `aih start` (or `aih up`) to override the proxy's model list:
 
 ```bash
