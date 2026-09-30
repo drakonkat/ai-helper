@@ -15,6 +15,7 @@ import { normalizeProxyOptions, startProxy } from "../src/proxy.js";
 import { createPresetHooks } from "../src/proxy-presets.js";
 import { transformOpenAIResponses } from "pxpipe-proxy";
 import { createProxyStatsRecorder, readProxyStats, tokenStage } from "../src/proxy-stats.js";
+import { execCommand } from "../src/utils/process.js";
 
 const exec = promisify(execFile);
 // The proxy worker deliberately runs on Node, including when launched by Bun.
@@ -648,6 +649,15 @@ test("proxy bind failure cleans up and close is idempotent", async t => {
   const {proxy} = await fixture(t, (_req, res) => res.end("ok"), {preset: "pxpipe", models: "gpt-6-astra"});
   await assert.rejects(startProxy({upstream: "http://127.0.0.1:1", listen: proxy.url, preset: "pxpipe"}), {code: "EADDRINUSE"});
   await Promise.all([proxy.close(), proxy.close()]);
+});
+
+test("timed-out process discovery commands terminate with a failed exit status", { timeout: 5000 }, async () => {
+  const result = await execCommand(process.execPath, ["-e", "setTimeout(() => console.log('late output'), 1500)"], 100);
+  assert.notEqual(result.exitCode, 0);
+  assert.equal(result.stdout.includes("late output"), false);
+  const success = await execCommand(process.execPath, ["-e", "console.log('ready')"], 5000);
+  assert.equal(success.exitCode, 0);
+  assert.equal(success.stdout.trim(), "ready");
 });
 
 test("CLI backgrounds, reports readiness, saves options, restarts and stops only its proxy", { timeout: 60000 }, async t => {

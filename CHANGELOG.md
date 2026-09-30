@@ -4,6 +4,14 @@ All notable changes to **`ai-helper` (`aih`)** are documented in this file.
 
 ---
 
+## [1.2.14] - 2026-09-30
+
+### Fixed
+- Bound Windows PowerShell/CIM discovery to 10 seconds so a cold or stalled provider cannot hang CLI status or port discovery. Discard failed scans while preserving live service PIDs already recorded in state.
+- Treat subprocess termination without an exit code as failure and add a regression check for command deadlines. This fixes the Windows/Node 20 CI status test failure.
+
+---
+
 ## [1.2.13] - 2026-09-30
 
 ### Fixed

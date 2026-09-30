@@ -15,14 +15,16 @@ export function sleep(ms) {
  * Helper to run a command and return stdout/stderr asynchronously.
  * @param {string} cmd
  * @param {string[]} args
+ * @param {number} [timeout=0] Maximum runtime in milliseconds; zero disables the deadline.
  * @returns {Promise<{ exitCode: number; stdout: string; stderr: string }>}
  */
-export function execCommand(cmd, args) {
+export function execCommand(cmd, args, timeout = 0) {
   return new Promise(resolve => {
     try {
       const proc = spawn(cmd, args, {
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
+        timeout,
       });
 
       let stdout = "";
@@ -32,7 +34,7 @@ export function execCommand(cmd, args) {
       proc.stderr?.on("data", d => (stderr += d.toString()));
 
       proc.on("close", exitCode => {
-        resolve({ exitCode: exitCode ?? 0, stdout, stderr });
+        resolve({ exitCode: exitCode ?? 1, stdout, stderr });
       });
 
       proc.on("error", err => {
@@ -107,7 +109,8 @@ export async function findPidsListeningOnPorts(ports) {
     try {
       const portList = ports.join(", ");
       const script = `Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -in ${portList} } | Select-Object -ExpandProperty OwningProcess`;
-      const res = await execCommand("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script]);
+      const res = await execCommand("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], 10000);
+      if (res.exitCode !== 0) return [];
       const lines = res.stdout.trim().split(/\r?\n/);
       for (const line of lines) {
         const pid = parseInt(line.trim(), 10);
@@ -372,8 +375,9 @@ export async function discoverRunningProcesses({ knownServices = {} } = {}) {
           Select-Object LocalPort, OwningProcess
         @{ Procs = $procs; Ports = $ports } | ConvertTo-Json -Depth 3
       `;
-      const res = await execCommand("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script]);
-      if (res.stdout.trim()) return discoverWindowsProcesses(JSON.parse(res.stdout), { knownServices });
+      // A cold or stalled CIM provider must not hold status and the dashboard indefinitely.
+      const res = await execCommand("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], 10000);
+      if (res.exitCode === 0 && res.stdout.trim()) return discoverWindowsProcesses(JSON.parse(res.stdout), { knownServices });
     } catch {}
   } else {
     try {

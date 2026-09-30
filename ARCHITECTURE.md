@@ -74,6 +74,11 @@ $ports = Get-NetTCPConnection -State Listen | Select-Object LocalPort, OwningPro
 3. Automatically computes uptimes from `CreationDate`.
 4. Maps dynamic ports to Web Dashboard URLs.
 
+PowerShell discovery queries have a 10-second deadline so a cold or stalled CIM
+provider cannot block status indefinitely. A failed scan is discarded; persisted
+service PIDs are still checked for liveness and the next status refresh retries
+external-process discovery.
+
 ### Unix Implementation
 Uses `ps -eo pid,command` to match command line strings and extract active PIDs.
 
