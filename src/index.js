@@ -1,5 +1,6 @@
 import { APP_NAME, CLI_NAME, SERVICES, SERVICE_IDS, VERSION } from "./config.js";
 import { manager } from "./manager.js";
+import { normalizeStartServices } from "./startup-services.js";
 import { checkForUpdates, updateSelf } from "./update.js";
 import { readProxyStats, proxyStatsLines } from "./proxy-stats.js";
 import {
@@ -76,17 +77,20 @@ ${bold("PROXY OPTIONS (start/up/restart proxy):")}
                             pxpipe runs in up to 2 persistent workers; excluded models skip the queue
   ${gray("--headroom-url <url>")}     Headroom service (default: http://127.0.0.1:8787)
   ${gray("--rtk-filter <name>")}      Fixed rtk pipe filter; --rtk-filter= restores auto-detection
+  ${gray("--pxpipe-native-images <mode>")} allow | bypass (default: allow)
   ${gray("--max-body-bytes <num>")}   Positive integer; buffered request / WebSocket limit
                             (default: 67108864 bytes = 64 MiB)
   Saved proxy options are reused when omitted. To change a running proxy, use restart proxy.
 
 ${bold("START DEFAULTS AND MODEL VALUES:")}
-  Without service targets, start/up launches ocx, agentmemory, then proxy with:
+  Without service targets, start/up uses the Startup selection saved in status --ui setup.
+  Until configured, it launches ocx, agentmemory, then proxy with:
     upstream: http://127.0.0.1:10100/   listen: http://127.0.0.1:10102   preset: pxpipe
     models: gpt-6-astra,google-antigravity/gemini-3.8*,anthropic/claude-fable*
   config pxpipe-models=<list> saves a replacement list; --models overrides it.
   Model names are comma-separated; a trailing * matches a prefix (include provider names).
-  All models are forwarded; the list selects which ones pxpipe may process.
+  All models are forwarded; an explicit list selects the entire compression pipeline.
+  --models "*" selects all models. Empty restores pxpipe defaults; RTK/Headroom run on all.
   Value options accept --flag value or --flag=value. Quote lists, wildcards and spaced paths.
   --models= restores pxpipe's default model selection; --models "" also works if the shell
   preserves empty arguments. Bare --models without a value is an error.
@@ -217,6 +221,7 @@ export async function main({ updateSelfImpl = updateSelf } = {}) {
       listen: { type: "string" }, interceptor: { type: "string" },
       preset: { type: "string" }, models: { type: "string" },
       "headroom-url": { type: "string" }, "rtk-filter": { type: "string" },
+      "pxpipe-native-images": { type: "string" },
       "max-body-bytes": { type: "string" }, json: { type: "boolean" },
     } });
     if (positionals.length > 1) throw new Error("Expected one upstream URL");
@@ -224,7 +229,7 @@ export async function main({ updateSelfImpl = updateSelf } = {}) {
     if (positionals[0]) options.upstream = positionals[0];
     if (values.listen !== undefined) options.listen = values.listen;
     if (values.interceptor !== undefined) options.interceptor = values.interceptor;
-    for (const [flag, key] of Object.entries({ preset: "preset", models: "models", "headroom-url": "headroomUrl", "rtk-filter": "rtkFilter" })) {
+    for (const [flag, key] of Object.entries({ preset: "preset", models: "models", "headroom-url": "headroomUrl", "rtk-filter": "rtkFilter", "pxpipe-native-images": "pxpipeNativeImages" })) {
       if (values[flag] !== undefined) options[key] = values[flag];
     }
     if (values["max-body-bytes"] !== undefined) options.maxBodyBytes = values["max-body-bytes"];
@@ -317,6 +322,7 @@ export async function main({ updateSelfImpl = updateSelf } = {}) {
       }
       const state = manager.readState();
       state.config = { ...state.config, pxpipeModels: targets[0].slice("pxpipe-models=".length) };
+      if (state.config.proxyOptions) state.config.proxyOptions.models = state.config.pxpipeModels;
       manager.saveState(state);
       console.log(green(`Saved pxpipe-models=${state.config.pxpipeModels}; applies on the next proxy start or restart.`));
       break;
@@ -455,7 +461,7 @@ export async function main({ updateSelfImpl = updateSelf } = {}) {
     case "up": {
       await checkForUpdates();
       if (!jsonOutput) printBanner();
-      const svcsToStart = targets.length > 0 ? targets : ["ocx", "agentmemory", "proxy"];
+      const svcsToStart = targets.length > 0 ? targets : normalizeStartServices(manager.readState().config?.startServices);
       if (!jsonOutput) console.log(cyan(`Starting service(s): ${svcsToStart.join(", ")}...\n`));
       const results = [];
 
@@ -466,6 +472,8 @@ export async function main({ updateSelfImpl = updateSelf } = {}) {
           listen: "http://127.0.0.1:10102",
           preset: "pxpipe",
           models: models ?? manager.readState().config?.pxpipeModels ?? "gpt-6-astra,google-antigravity/gemini-3.8*,anthropic/claude-fable*",
+          ...manager.readState().config?.proxyOptions,
+          ...(models !== undefined ? { models } : {}),
         } : id === "proxy" && models !== undefined ? { models } : undefined);
         results.push({ id, ...res });
         if (jsonOutput) continue;

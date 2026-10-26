@@ -4,6 +4,20 @@ All notable changes to **`ai-helper` (`aih`)** are documented in this file.
 
 ---
 
+## [1.2.15] - 2026-10-26
+
+### Added
+- Multi-select Startup step in proxy setup to choose the services launched together by plain `aih start` / `aih up`, preserving explicit CLI targets and upstream-first ordering.
+- `c` / setup proxy in `aih status --ui`: guided editing of all proxy options, conditional tool fields, local drafts, configuration diff, preflight, save-only and apply-now actions.
+- Separate desired proxy settings from the running worker, preserve explicit empty resets and attempt recovery of the previous worker after failed setup application.
+- CLI `--pxpipe-native-images allow|bypass` and explicit `--models "*"` selection.
+
+### Changed
+- Explicit model allowlists now gate the entire compression recipe, including RTK and Headroom, not only pxpipe. Excluded requests remain byte-identical and retain per-stage bypass telemetry.
+- Benchmark JSON records include proxy/worker timings and live provider headers/first-output timings when available.
+
+---
+
 ## [1.2.14] - 2026-09-30
 
 ### Fixed

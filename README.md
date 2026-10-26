@@ -167,6 +167,53 @@ repository. Plain `status` prints full repository links, and `status --json`
 includes `repositoryUrl` (null for custom services without metadata). The built-in
 proxy links to ai-helper's repository, not its forwarding address.
 
+#### Guided proxy setup
+
+Press **`c` — setup proxy** from anywhere in `aih status --ui`, even before the
+proxy's first start. The wizard edits a local draft: upstream/listener, supported
+ordered recipes, model list, Headroom URL, RTK filter, pxpipe native-image handling,
+interceptor `.mjs` and maximum body size. Tool-specific fields appear only when
+that tool is enabled. pxpipe is bundled as a library; its separate daemon is not required.
+
+- **Enter/Tab** advances; **Shift+Tab** goes back. Arrows/Space select recipe/options.
+- Text fields support arrows, Home/End, Backspace/Delete and **Ctrl+U** to clear.
+  Comma-separated model entries can be edited/removed directly; `*` selects all models.
+- Each field shows **Initial value** (the draft loaded when setup opened) and
+  **Current setting** (the actual worker configuration, refreshed with the dashboard).
+  A stopped proxy is marked explicitly; an unconfigured proxy shows **not configured**.
+  Pending saved settings can differ from the current worker. The editable line is the new draft.
+- The **Startup** step selects which services launch together with plain `aih start`
+  or `aih up`: OCX, AgentMemory, standalone pxpipe, Headroom and the built-in proxy.
+  Use **Up/Down** to move, **Space** to toggle and **Enter** to continue. Select at
+  least one service. Choices are saved with setup in `state.config.startServices`.
+  Upstream services launch first, followed by the built-in proxy. Until configured,
+  the defaults remain OCX, AgentMemory and proxy. Explicit targets such as
+  `aih start ocx` override the selection; `aih start --gpt` keeps its dedicated workflow.
+  Saving/applying setup does not launch the selected services immediately: the
+  selection takes effect on the next plain start/up. Apply now only starts/restarts the proxy.
+- **Esc** cancels; a modified draft asks for confirmation before discarding it.
+- The final summary marks differences from the running configuration. Use arrows
+  and Enter to choose an action, and **PgUp/PgDn** to scroll details.
+- **Check** checks the listener, RTK executable, bundled pxpipe and interceptor
+  readability, then probes upstream/Headroom without credentials. Endpoint failures
+  are advisory: reachability is not proof of authenticated API compatibility.
+  Interceptor code is never executed by preflight.
+- **Save only** persists the desired configuration without touching the current
+  process. It also works while stopped; it does not start dependencies or the proxy.
+- **Save and apply now** repeats preflight, then starts/restarts the proxy. Restart
+  interrupts active requests and streams; this is not hot reload. On startup failure,
+  AIH attempts to restore the previous running configuration and reports recovery failures.
+  If stopping the current proxy fails, AIH saves the desired settings without starting
+  a replacement. For Windows access-denied errors, stop/restart from a terminal with
+  the same permissions as the proxy (Administrator if it was started elevated).
+
+Desired settings live in `state.config.proxyOptions`; `state.services.proxy.proxyOptions`
+continues to describe the actual worker. Saved setup wins over legacy `pxpipe-models`
+and no-target start defaults. Explicit CLI options still override saved setup and,
+once a setup exists, successful starts retain the effective configuration there.
+`aih config pxpipe-models=...` explicitly updates the setup model preference too.
+Empty optional values persist as resets, not as omitted overrides.
+
 The dashboard's
 `VERSION` column shows the running service version when available, otherwise the
 installed version. `UPDATE` shows `↑ <version>` for an available update,
@@ -363,7 +410,9 @@ aih start
 
 The preference is saved in `~/.aih/state.json` (or `AIH_HOME/state.json`).
 It applies to `start`/`up` and proxy starts/restarts; an explicit `--models`
-takes precedence without changing the preference. `aih config pxpipe-models=`
+takes precedence without changing the legacy preference. If a dashboard setup
+exists, successful starts retain their effective options in that setup instead.
+`aih config pxpipe-models=`
 saves pxpipe's default selection. Configuration does not restart a running proxy.
 
 The value is passed only to the built-in proxy; `ocx` and `agentmemory` start
@@ -371,7 +420,8 @@ normally. `--models=` passes an empty string; `--models ""` also works when your
 shell preserves empty arguments. A bare `--models` without a value is an error.
 See [Select models](#select-models) for matching and compression behavior.
 
-The no-target `start`/`up` commands supply the upstream, listener and preset above
+Without a saved Startup selection, no-target `start`/`up` launches OCX, AgentMemory
+and proxy. Unless a dashboard setup has been saved, these commands supply the upstream, listener and preset above
 on every invocation, plus the configured model list (or the list above if unset),
 unless `--models` overrides it.
 Other saved proxy options are retained.
@@ -481,7 +531,8 @@ options; defaults in this table apply when no saved value exists.
 | --- | --- |
 | `--listen http://127.0.0.1:10102` | Loopback HTTP listener; default `http://127.0.0.1:10101`. |
 | `--preset headroom-pxpipe` | Pipeline; default `none`. Choices: `none`, `pxpipe`, `headroom`, `rtk`, `headroom-pxpipe`, `rtk-pxpipe`, `rtk-headroom-pxpipe`. |
-| `--models "gpt-6-astra,anthropic/claude-fable*"` | pxpipe model selection; `--models=` restores pxpipe's defaults. Also accepted by generic `start`/`up`. |
+| `--models "gpt-6-astra,anthropic/claude-fable*"` | Entire pipeline allowlist; `--models "*"` selects all; empty restores pxpipe defaults with RTK/Headroom on all. Also accepted by generic `start`/`up`. |
+| `--pxpipe-native-images allow\|bypass` | Allow pxpipe on native-image requests (default) or bypass that stage. |
 | `--interceptor "./my hooks/interceptor.mjs"` | Custom JavaScript hooks, loaded at startup; default none. `--interceptor=` clears the saved path. |
 | `--headroom-url http://127.0.0.1:8787` | Headroom compression service; default shown. |
 | `--rtk-filter grep` | Fixed RTK filter for matching tool output; default auto-detection. `--rtk-filter=` resets it. |
@@ -588,8 +639,11 @@ grep-output filter to every tool result, so use it only with matching output.
 
 ### Select models
 
-**All models are forwarded.** `--models` selects only which models pxpipe may
-compress; Headroom/RTK still process eligible requests outside that list.
+**All models are forwarded.** An explicit `--models` list selects the entire
+compression recipe: excluded requests bypass RTK, Headroom and pxpipe unchanged.
+This replaces the older pxpipe-only filtering behavior. `--models "*"` includes
+all models. With an empty/omitted selection, pxpipe uses its supported-model
+defaults while RTK/Headroom process all eligible requests.
 Names match the `model` in the request, including any provider prefix.
 For example, an AGY catalog entry can be `google-antigravity/gemini-3.8-flash`,
 while Astra is `gpt-6-astra`.
@@ -670,7 +724,10 @@ npm run bench:proxy -- --headroom-url http://127.0.0.1:8787 --repetitions 5
 ```
 
 Results include JSON, JSONL, CSV and Markdown. Unknown image costs are not counted
-as zero, and offline checks never claim a semantic-quality winner. Benchmark-only
+as zero. JSON/JSONL records retain available proxy preset, worker queue/processing,
+CPU and event-loop timings, plus live provider headers and first output; see the
+benchmark documentation for measurement boundaries. Offline checks never claim
+a semantic-quality winner. Benchmark-only
 pxpipe allowlisting defaults to all fixture models so imaging is actually exercised.
 See [benchmark documentation](docs/benchmark.md) for corpus customization, live
 evaluation, privacy, limitations and quality/performance decision thresholds.
@@ -702,11 +759,11 @@ to restore RTK auto-detection.
   Use a fixed filter only when the tool output matches that format. Empty or larger
   results are discarded. Prompts, tool calls and binary content are left untouched;
   no command from an AI request is executed.
-- **headroom-pxpipe:** always applies Headroom first; `--models` gates only the
-  following pxpipe stage.
+- **headroom-pxpipe:** applies Headroom first, then pxpipe; an explicit `--models`
+  list gates both stages.
 - **rtk-pxpipe:** applies RTK to tool-result text first, then the pxpipe library.
-  `--rtk-filter` controls RTK and `--models` gates only pxpipe; RTK still runs for
-  models outside the allowlist. This chain needs RTK on PATH, with no Headroom service.
+  `--rtk-filter` controls RTK and an explicit `--models` list gates both stages.
+  This chain needs RTK on PATH, with no Headroom service.
 
 Presets process JSON POSTs on Messages, Chat Completions and Responses routes,
 and outgoing WebSocket `response.create` events (flat or nested under `response`).

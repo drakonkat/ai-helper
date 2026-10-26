@@ -391,7 +391,7 @@ test("rtk preset filters only tool output text in all three AI formats", { timeo
 });
 
 for (const preset of ["rtk-pxpipe", "rtk-headroom-pxpipe"]) {
-test(`${preset} preserves stage order over HTTP and WS; models gate only pxpipe`, { timeout: 20000 }, async t => {
+test(`${preset} preserves stage order over HTTP and WS; models gate the entire pipeline`, { timeout: 20000 }, async t => {
   try { await exec("rtk", ["--version"], { windowsHide: true }); }
   catch (error) { if (error.code === "ENOENT") return t.skip("rtk is not installed"); throw error; }
   const body = aiBody();
@@ -417,7 +417,7 @@ test(`${preset} preserves stage order over HTTP and WS; models gate only pxpipe`
       assert.equal(payload.messages[0].content, afterRtk.input[2].output, "Headroom must receive RTK output, not original text");
       assert.equal(payload.config.mode, "lossy_inline");
       res.writeHead(headroomCalls === 4 ? 503 : 200, { "content-type": "application/json" });
-      // Third request tests an unchanged Headroom result + gated pxpipe: retain RTK changes.
+      // Third included request tests an unchanged Headroom result: retain RTK changes.
       res.end(JSON.stringify({ messages: payload.messages.map(m => ({ ...m, content: headroomCalls === 3 ? m.content : "headroom-result" })), tokens_before: 100, tokens_after: headroomCalls === 3 ? 100 : 5 }));
     });
     headroomUrl = await listen(compressor);
@@ -441,19 +441,25 @@ test(`${preset} preserves stage order over HTTP and WS; models gate only pxpipe`
   assert.deepEqual(JSON.parse((await reply)[0]), { type: "response.create", response: JSON.parse(Buffer.from(expected.body)), event_id: "keep" });
   const excluded = await request(proxy.url + context.path, { method: "POST", headers: context.headers }, JSON.stringify({ ...body, model: "other-model" }));
   assert.equal(excluded.status, 200);
-  assert.deepEqual(JSON.parse(excluded.body), { ...JSON.parse(context.body), model: "other-model" });
+  assert.deepEqual(JSON.parse(excluded.body), { ...body, model: "other-model" });
   assert.deepEqual(measurements[0].stages.map(s => s.name), withHeadroom ? ["rtk", "headroom", "pxpipe"] : ["rtk", "pxpipe"]);
   assert.deepEqual(measurements[1].stages.map(s => s.name), measurements[0].stages.map(s => s.name));
   assert.ok(measurements[0].stages[0].saved > 0);
   assert.ok(measurements[0].stages.at(-1).saved > 0);
   assert.equal(measurements[2].stages.at(-1).reason, "model_excluded");
-  assert.equal(measurements[2].changed, true);
+  assert.equal(measurements[2].changed, false);
+  assert.ok(measurements[2].stages.every(stage => stage.reason === "model_excluded"));
   if (withHeadroom) {
-    assert.equal(headroomCalls, 3);
+    assert.equal(headroomCalls, 2, "Excluded models must not call Headroom");
     assert.equal(measurements[2].stages[1].applied, false);
+    const unchanged = await request(proxy.url + context.path, { method: "POST", headers: context.headers }, JSON.stringify(body));
+    assert.equal(unchanged.status, 200);
+    const afterNoopHeadroom = await transformOpenAIResponses(Buffer.from(JSON.stringify(afterRtk)), { model: body.model });
+    assert.deepEqual(JSON.parse(unchanged.body), JSON.parse(Buffer.from(afterNoopHeadroom.body)));
+    assert.equal(measurements[3].stages[1].applied, false);
     assert.equal((await request(proxy.url + context.path, { method: "POST", headers: context.headers }, JSON.stringify(body))).status, 502);
-    assert.equal(measurements[3].error, true);
-    assert.deepEqual(measurements[3].stages.map(s => s.name), ["rtk"], "Stop before pxpipe on Headroom failure");
+    assert.equal(measurements[4].error, true);
+    assert.deepEqual(measurements[4].stages.map(s => s.name), ["rtk"], "Stop before pxpipe on Headroom failure");
   }
 });
 }

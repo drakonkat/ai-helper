@@ -33,6 +33,8 @@ test("Responses SSE reconstructs observed Astra finalized message with empty ter
   assert.equal(result.complete, true);
   assert.equal(result.text, "2.17.4-rc.3");
   assert.equal(result.outputFromFinalizedItems, true);
+  assert.ok(result.headersMs >= 0 && result.headersMs <= result.firstOutputMs);
+  assert.ok(result.firstOutputMs <= result.durationMs);
   assert.equal(result.usage.inputTokens, 155);
   assert.equal(result.usage.outputTokens, 13);
 });

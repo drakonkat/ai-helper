@@ -258,6 +258,21 @@ Ogni fixture pone una domanda con risposta nota contenuta nel tool output;
 - input/output/cache read/cache write/reasoning dichiarati dal provider;
 - risposta completa o troncata, tool aggiuntivi richiesti dal modello.
 
+I record JSON/JSONL conservano anche `proxyTimings`: `presetMs`,
+`pxpipeQueueMs` (include l'avvio del worker), `pxpipeMs`, `pxpipeCpuMs` quando
+supportato dal runtime, `eventLoopLagMs`, `upstreamHeadersMs` e `totalMs`.
+La baseline `none` non emette eventi preset e ha `proxyTimings: null`.
+`live.headersMs` misura gli header del provider e `live.firstOutputMs` il primo
+delta testuale SSE osservato dal collector. Quest'ultimo non è un tempo al primo
+token misurato dal client: il collector restituisce al runner solo a stream finito.
+Per lo stesso motivo `proxyTimings.upstreamHeadersMs` misura gli header del
+collector, **non** quelli del provider. Il ritardo event loop è condiviso e
+campionato, non CPU imputabile a una singola richiesta. Le metriche sono annidate
+e non vanno sommate tutte fra loro; valori non disponibili restano assenti/null.
+RTK e Headroom non espongono tempi di stadio separati: sono inclusi in `presetMs`.
+Le tabelle aggregate CSV/Markdown mantengono le metriche storiche; i dettagli
+temporali sono disponibili nei record JSON/JSONL.
+
 Per Anthropic l'input normalizzato comprende input non-cached + letture/scritture
 cache, evitando di confrontare scope diversi. Campi non restituiti restano null.
 Di default streaming viene disabilitato; `--responses-stream` lo abilita solo per

@@ -3,6 +3,8 @@ import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { normalizeProxyOptions } from "./proxy.js";
+import { normalizeStartServices } from "./startup-services.js";
+import { preflightProxy, savedProxyOptions } from "./proxy-setup.js";
 import { SERVICES, SERVICE_IDS, SERVICE_PACKAGES, APP_REPOSITORY_URL } from "./config.js";
 import { compareVersions, getServiceVersions } from "./utils/versions.js";
 import { installServiceUpdate, serviceStartCommand } from "./service-updates.js";
@@ -402,6 +404,7 @@ export class ServiceManager {
     const config = normalizeProxyOptions({
       ...current?.proxyOptions,
       ...(state.config?.pxpipeModels !== undefined ? { models: state.config.pxpipeModels } : {}),
+      ...state.config?.proxyOptions,
       ...options,
     });
     if (current?.status === "running" && isPidRunning(current.pid)) {
@@ -461,6 +464,7 @@ export class ServiceManager {
         status: "running", pid: child.pid, startedAt: new Date().toISOString(),
         url: ready.url, proxyOptions: config,
       };
+      if (updated.config?.proxyOptions) updated.config.proxyOptions = savedProxyOptions(config);
       this.saveState(updated);
       return { success: true, pid: child.pid, url: ready.url, codexConfig: await this.configureCodexProxy() };
     } catch (error) {
@@ -555,13 +559,76 @@ export class ServiceManager {
   async restartService(serviceId, options) {
     if (serviceId === "proxy") {
       const current = this.readState().services.proxy;
-      normalizeProxyOptions({ ...current?.proxyOptions, ...options });
+      normalizeProxyOptions({ ...current?.proxyOptions, ...this.readState().config?.proxyOptions, ...options });
       if (!current) return this.startService(serviceId, options);
     }
     const stopped = await this.stopService(serviceId);
     if (!stopped.success) return stopped;
     await sleep(600);
     return await this.startService(serviceId, options);
+  }
+
+  /** Desired configuration is separate from the running worker's snapshot. */
+  saveProxyConfiguration(options, { startServices } = {}) {
+    const config = normalizeProxyOptions(options);
+    const startup = startServices === undefined ? undefined : normalizeStartServices(startServices);
+    const state = this.readState();
+    state.config = { ...state.config, proxyOptions: savedProxyOptions(config) };
+    if (startup) state.config.startServices = startup;
+    this.saveState(state);
+    return { success: true, message: "Configuration saved for the next start/restart. Current proxy unchanged." };
+  }
+
+  /** Validate before stopping; recover the old worker if applying the draft fails. */
+  async applyProxyConfiguration(options, { preflight = preflightProxy, startServices } = {}) {
+    if (this.proxySetupBusy) return { success: false, message: "Proxy setup already in progress" };
+    this.proxySetupBusy = true;
+    try {
+      const config = normalizeProxyOptions(options);
+      if (startServices !== undefined) startServices = normalizeStartServices(startServices);
+      const state = await this.syncState();
+      const previous = state.services.proxy;
+      const oldDesired = state.config?.proxyOptions;
+      const checks = await preflight(config, previous);
+      const wasRunning = previous?.status === "running";
+      if (wasRunning) {
+        const stopped = await this.stopService("proxy");
+        if (!stopped.success) {
+          this.saveProxyConfiguration(config, { startServices });
+          return { ...stopped, saved: true, applied: false,
+            message: `Configuration saved, but not applied: could not stop the current proxy. ${stopped.message} If access is denied, stop/restart the proxy from a terminal with the same permissions (Administrator if it was started elevated), then retry. Saved settings will be used on the next start/restart.` };
+        }
+        await sleep(600);
+      }
+      try {
+        const result = await this.startService("proxy", config);
+        if (!result.success) throw new Error(result.message || "Startup failed");
+        this.saveProxyConfiguration(config, { startServices });
+        return { ...result, checks, message: ["Configuration applied and saved", ...(checks || []).filter(c => c.startsWith("Warning:"))].join(" | ") };
+      } catch (error) {
+        // A failed start may have persisted a runtime entry before a later error.
+        try { await this.stopService("proxy"); } catch {}
+        const restored = this.readState();
+        restored.config = { ...restored.config };
+        if (oldDesired === undefined) delete restored.config.proxyOptions;
+        else restored.config.proxyOptions = oldDesired;
+        if (previous) restored.services.proxy = { ...previous, status: "stopped", pid: undefined, startedAt: undefined };
+        this.saveState(restored);
+        let recovery;
+        if (wasRunning && previous.proxyOptions) {
+          try {
+            const result = await this.startService("proxy", savedProxyOptions(previous.proxyOptions));
+            recovery = result.success ? "Previous configuration restored" : `Recovery failed: ${result.message}`;
+          } catch (restoreError) { recovery = `Recovery failed: ${restoreError.message}`; }
+        }
+        const recoveredState = this.readState();
+        recoveredState.config = { ...recoveredState.config };
+        if (oldDesired === undefined) delete recoveredState.config.proxyOptions;
+        else recoveredState.config.proxyOptions = oldDesired;
+        this.saveState(recoveredState);
+        return { success: false, message: `Apply failed: ${error.message}. ${recovery || "Proxy stopped; previous configuration preserved"}` };
+      }
+    } finally { this.proxySetupBusy = false; }
   }
 
   /**

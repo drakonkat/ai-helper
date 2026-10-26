@@ -1,5 +1,7 @@
 import { APP_NAME, VERSION } from "./config.js";
 import { manager } from "./manager.js";
+import { ProxySetupWizard } from "./tui-proxy-setup.js";
+import { preflightProxy } from "./proxy-setup.js";
 import {
   badgeStatus,
   bold,
@@ -261,6 +263,10 @@ export class Dashboard {
       }
 
       const proxy = this.statuses.find(s => s.id === "proxy");
+      if (this.proxySetup) {
+        this.proxySetup.active = proxy?.proxyOptions;
+        this.proxySetup.running = proxy?.status === "running";
+      }
       const stats = await this.getProxyStats();
       const probed = await probeChain(this.statuses, { nativeOnly: true });
       const now = Date.now();
@@ -461,6 +467,7 @@ export class Dashboard {
   buildLines() {
     const width = Math.max(40, process.stdout.columns || 100);
     const height = Math.max(12, process.stdout.rows || 30);
+    if (this.proxySetup) return this.proxySetup.lines(width, height, this.busy).map(line => clip(line, width));
     const lines = [];
     const svc = this.currentService();
     const target = svc ? bold(svc.id) : dim("-");
@@ -469,6 +476,7 @@ export class Dashboard {
       `${dim("q")} esci`,
       `${dim("up/down")} seleziona (${target})`,
       `${dim("s")} start`,
+      `${dim("c")} setup proxy`,
       `${dim("x")} stop`,
       `${dim("r")} restart`,
       `${dim("u")} update`,
@@ -610,12 +618,26 @@ export class Dashboard {
    * @param {string} key
    */
   onKey(key) {
+    if (this.proxySetup && key !== "\u0003") {
+      if (this.busy) return;
+      const command = this.proxySetup.handle(key);
+      if (command === "cancel") this.proxySetup = null;
+      else if (command) this.runProxySetupAction(command);
+      this.render();
+      return;
+    }
     if (key === "\u0003" || key === "q") {
       this.stop();
       return;
     }
 
     switch (key) {
+      case "c":
+        if (this.busy) return;
+        try { this.proxySetup = new ProxySetupWizard(manager.readState()); }
+        catch (error) { this.status = red(error.message); }
+        this.render();
+        return;
       case "d":
         this.showPipelineDetails = !this.showPipelineDetails;
         this.render();
@@ -672,8 +694,32 @@ export class Dashboard {
     }
   }
 
+  async runProxySetupAction(command) {
+    if (this.busy || !this.proxySetup) return;
+    const wizard = this.proxySetup;
+    this.busy = true;
+    this.render();
+    try {
+      const options = wizard.validate();
+      if (command === "check") {
+        wizard.checks = [];
+        wizard.checks = await preflightProxy(options, (await manager.syncState()).services.proxy);
+      } else {
+        const startup = { startServices: wizard.draft.startServices.split(",") };
+        const result = command === "save" ? manager.saveProxyConfiguration(options, startup)
+          : await manager.applyProxyConfiguration(options, startup);
+        if (!result.success) throw new Error(result.message);
+        this.status = [result.message, result.codexConfig?.message].filter(Boolean).join(" | ");
+        this.proxySetup = null;
+      }
+    } catch (error) { wizard.error = error.message; }
+    finally { this.busy = false; }
+    await this.refresh();
+    this.render();
+  }
+
   enterScreen() {
-    process.stdout.write(ALT_SCREEN_ON + CURSOR_HIDE);
+    process.stdout.write(ALT_SCREEN_ON + CURSOR_HIDE + "\x1b[?2004h");
     if (process.stdin.isTTY) {
       process.stdin.setRawMode(true);
       process.stdin.resume();
@@ -688,6 +734,7 @@ export class Dashboard {
 
   /** Always restores the terminal, even on a crash. */
   leaveScreen() {
+    this.keyDecoder?.dispose();
     if (process.stdin.isTTY) {
       try {
         process.stdin.setRawMode(false);
@@ -699,7 +746,7 @@ export class Dashboard {
     process.off("SIGINT", this.onSigint);
     process.off("uncaughtException", this.onFatal);
     process.off("unhandledRejection", this.onFatal);
-    process.stdout.write(CURSOR_SHOW + ALT_SCREEN_OFF);
+    process.stdout.write("\x1b[?2004l" + CURSOR_SHOW + ALT_SCREEN_OFF);
   }
 
   stop() {
@@ -711,8 +758,9 @@ export class Dashboard {
   }
 
   async start() {
+    this.keyDecoder = new KeyDecoder(key => this.onKey(key));
     this.onData = chunk => {
-      for (const key of splitKeys(String(chunk))) this.onKey(key);
+      this.keyDecoder.push(String(chunk));
     };
     this.onResize = () => this.render();
     this.onSigint = () => this.stop();
@@ -755,15 +803,43 @@ export function splitKeys(chunk) {
   const keys = [];
   let i = 0;
   while (i < chunk.length) {
-    if (chunk[i] === "\x1b" && chunk[i + 1] === "[" && chunk[i + 2]) {
-      keys.push(chunk.slice(i, i + 3));
-      i += 3;
+    const escape = chunk.slice(i).match(/^\x1b\[[0-9;]*[A-Za-z~]/);
+    if (escape) {
+      keys.push(escape[0]);
+      i += escape[0].length;
       continue;
     }
-    keys.push(chunk[i]);
-    i++;
+    const point = String.fromCodePoint(chunk.codePointAt(i));
+    keys.push(point);
+    i += point.length;
   }
   return keys;
+}
+
+/** CSI/paste sequences may arrive across separate stdin chunks. */
+export class KeyDecoder {
+  constructor(onKey) { this.onKey = onKey; this.pending = ""; }
+  push(chunk) {
+    clearTimeout(this.timer);
+    const input = this.pending + chunk;
+    this.pending = "";
+    const partial = input.match(/\x1b(?:\[[0-9;]*)?$/);
+    const complete = partial ? input.slice(0, -partial[0].length) : input;
+    for (const key of splitKeys(complete)) this.onKey(key);
+    if (partial) {
+      this.pending = partial[0];
+      this.timer = setTimeout(() => this.flush(), 50);
+      this.timer.unref?.();
+    }
+  }
+  flush() {
+    clearTimeout(this.timer);
+    const pending = this.pending;
+    this.pending = "";
+    // A bare Esc is cancellation; truncated CSI must not turn into text/actions.
+    if (pending === "\x1b") this.onKey(pending);
+  }
+  dispose() { clearTimeout(this.timer); this.pending = ""; }
 }
 
 /**

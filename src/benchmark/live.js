@@ -148,28 +148,29 @@ export async function callProvider(body, fixture, options) {
     method: "POST", headers, body: JSON.stringify(body), redirect: "error",
     signal: options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(options.timeoutMs)]) : AbortSignal.timeout(options.timeoutMs),
   });
+  const headersMs = performance.now() - start;
   if (response.ok && fixture.format === "responses" && /^text\/event-stream(?:\s*;|\s*$)/i.test(response.headers.get("content-type") || "")) {
     try {
       const parsed = await readResponsesStream(response, options.maxBodyBytes, start);
-      return { status: response.status, durationMs: performance.now() - start, ...parsed };
+      return { status: response.status, headersMs, durationMs: performance.now() - start, ...parsed };
     } catch (error) {
       // Only locally constructed diagnostics survive; never JSON parser errors,
       // provider event bodies, echoed prompts or credentials.
       const safe = ["Provider SSE ended without a terminal response", "Provider SSE contained invalid event data",
         "Provider SSE reported an error", "Provider SSE contained an invalid terminal response", "Response exceeds benchmark maxBodyBytes",
         "Provider SSE contained an invalid finalized output item", "Provider SSE contained conflicting finalized output items"];
-      return { status: response.status, durationMs: performance.now() - start, complete: false,
+      return { status: response.status, headersMs, durationMs: performance.now() - start, complete: false,
         error: safe.includes(error.message) ? error.message : "Provider SSE could not be read" };
     }
   }
   const raw = await readLimited(response, options.maxBodyBytes);
   const durationMs = performance.now() - start;
   // Never put provider error bodies (which can echo credentials/prompts) in reports.
-  if (!response.ok) return { status: response.status, durationMs, error: `Provider HTTP ${response.status}` };
+  if (!response.ok) return { status: response.status, headersMs, durationMs, error: `Provider HTTP ${response.status}` };
   let value;
-  try { value = JSON.parse(raw); } catch { return { status: response.status, durationMs, error: "Provider did not return JSON or a supported Responses SSE stream" }; }
-  try { return { status: response.status, durationMs, ...parseProviderResponse(value, fixture.format) }; }
-  catch { return { status: response.status, durationMs, error: "Provider returned an invalid response shape" }; }
+  try { value = JSON.parse(raw); } catch { return { status: response.status, headersMs, durationMs, error: "Provider did not return JSON or a supported Responses SSE stream" }; }
+  try { return { status: response.status, headersMs, durationMs, ...parseProviderResponse(value, fixture.format) }; }
+  catch { return { status: response.status, headersMs, durationMs, error: "Provider returned an invalid response shape" }; }
 }
 
 const number = n => Number.isFinite(n) && n >= 0 ? n : null;

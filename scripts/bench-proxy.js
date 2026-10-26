@@ -42,6 +42,7 @@ Offline by default: private loopback proxies and real compressors; no provider c
   --help                 Show help
 
 Reports: report.json, records.jsonl, results.csv, report.md. Managed config/aih proxy stats are untouched.
+JSON records include proxy/worker timings and live provider headers/first-output timings when available.
 Exit 0 completed without request errors; 2 request errors/interruption; 1 invalid setup.
 Offline runs never claim a semantic-quality winner. See docs/benchmark.md.
 `;

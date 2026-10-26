@@ -223,7 +223,12 @@ export async function runBenchmark(inputOptions = {}) {
       try {
         state.proxy = await startProxy({ upstream: sink.url, listen: "http://127.0.0.1:0", ...flowOptions(preset),
           headroomUrl: options.headroomUrl, rtkFilter: options.rtkFilter, models: options.models,
-          maxBodyBytes: options.maxBodyBytes, onStats: event => sink.records.get(event.requestId)?.events.push(event) });
+          maxBodyBytes: options.maxBodyBytes, onStats: event => {
+            const entry = sink.records.get(event.requestId);
+            if (!entry) return;
+            entry.events.push(event);
+            return timings => { event.timings = { ...event.timings, ...timings }; };
+          } });
       } catch (error) { state.error = `Preset setup failed (${error.name})`; }
       state.startupMs = performance.now() - start;
     }
@@ -270,6 +275,7 @@ export async function runBenchmark(inputOptions = {}) {
             row.durationMs ??= performance.now() - start;
           } finally { controller.abort(); sink.records.delete(id); }
           row.stages = entry.events.flatMap(event => event.stages || []);
+          row.proxyTimings = entry.events.length ? { ...entry.events.at(-1).timings } : null;
           records.push(row);
           await options.onRecord?.(row);
         }

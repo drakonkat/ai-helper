@@ -7,7 +7,7 @@ import { requestImages } from "./request-images.js";
 import { createPxpipePool } from "./pxpipe-pool.js";
 
 // Fixed recipes; the user's --interceptor runs afterwards and can inspect/edit the result.
-const PRESETS = ["none", "pxpipe", "headroom", "rtk", "headroom-pxpipe", "rtk-pxpipe", "rtk-headroom-pxpipe"];
+export const PRESETS = Object.freeze(["none", "pxpipe", "headroom", "rtk", "headroom-pxpipe", "rtk-pxpipe", "rtk-headroom-pxpipe"]);
 const DECODERS = { gzip: promisify(zlib.gunzip), deflate: promisify(zlib.inflate), br: promisify(zlib.brotliDecompress),
   ...(typeof zlib.zstdDecompress === "function" ? { zstd: promisify(zlib.zstdDecompress) } : {}) };
 
@@ -15,7 +15,7 @@ export function normalizePresetOptions(options) {
   const preset = options.preset || "none";
   if (!PRESETS.includes(preset)) throw new Error(`Unknown preset. Choose: ${PRESETS.join(", ")}`);
   const models = options.models ? String(options.models).split(",").map(s => s.trim()) : undefined;
-  if (models?.some(s => !s || !/^[\w./:-]+\*?$/.test(s))) throw new Error("models must be comma-separated model names, optionally ending in *");
+  if (models?.some(s => !s || (s !== "*" && !/^[\w./:-]+\*?$/.test(s)))) throw new Error("models must be comma-separated model names, optionally ending in *, or * for all models");
   const headroom = new URL(options.headroomUrl || "http://127.0.0.1:8787");
   if (!["http:", "https:"].includes(headroom.protocol) || headroom.username || headroom.password || headroom.search || headroom.hash) {
     throw new Error("headroomUrl must be HTTP(S) without credentials, query or fragment");
@@ -163,6 +163,12 @@ export async function createPresetHooks(config, onStats = () => {}) {
         if (!websocket && typeof update === "function") context.updateTiming = update;
       } catch {}
     };
+    // Preserve observability and byte-for-byte forwarding for excluded models.
+    if (models && !models.some(m => m.endsWith("*") ? model.startsWith(m.slice(0, -1)) : model === m)) {
+      for (const stage of config.preset.split("-")) stages.push(tokenStage(stage, 0, 0, false, "model_excluded", "not_measured"));
+      report(false);
+      return raw;
+    }
     try {
       // Fixed stage order, including the triple recipe: RTK -> Headroom -> pxpipe.
       if (config.preset === "rtk" || config.preset.startsWith("rtk-")) {

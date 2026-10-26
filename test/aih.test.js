@@ -174,6 +174,7 @@ describe("Service start CLI", () => {
           [["ocx", "proxy", "--models", "custom/*"], [["ocx", undefined], ["proxy", { models: "custom/*" }]]],
           [["pxpipe", "headroom"], [["pxpipe", undefined], ["headroom", undefined]]],
           [["proxy", customProxy.upstream, "--listen", customProxy.listen, "--preset", customProxy.preset, "--models", customProxy.models], [["proxy", customProxy]]],
+          [["proxy", customProxy.upstream, "--pxpipe-native-images", "bypass"], [["proxy", { upstream: customProxy.upstream, pxpipeNativeImages: "bypass" }]]],
         ]) {
           calls.length = 0;
           process.argv = ["node", "aih", command, ...args, "--json"];
@@ -188,6 +189,61 @@ describe("Service start CLI", () => {
         }
       }
     } finally {
+      process.argv = original.argv;
+      globalThis.fetch = original.fetch;
+      console.log = original.log;
+      manager.startService = original.start;
+    }
+  });
+});
+
+describe("Dashboard setup CLI interoperability", () => {
+  it("uses saved setup for no-target starts and allows explicit model updates", async () => {
+    const original = { argv: process.argv, fetch: globalThis.fetch, log: console.log, start: manager.startService };
+    const previous = manager.readState();
+    const saved = { upstream: "http://127.0.0.1:19000/", listen: "http://127.0.0.1:19001/", preset: "rtk", models: "saved-model" };
+    const calls = [];
+    try {
+      console.log = () => {};
+      globalThis.fetch = async () => ({ ok: true, json: async () => ({ version: VERSION }) });
+      manager.saveState({ ...previous, config: { pxpipeModels: "legacy", proxyOptions: saved } });
+      manager.startService = async (id, options) => { calls.push([id, options]); return { success: true, pid: 123 }; };
+      process.argv = ["node", "aih", "--help"];
+      const { main } = await import("../src/index.js");
+      for (const command of ["start", "up"]) {
+        for (const explicit of [undefined, "*"]) {
+          calls.length = 0;
+          process.argv = ["node", "aih", command, ...(explicit === undefined ? [] : ["--models", explicit]), "--json"];
+          await main();
+          expect(calls[2]).toEqual(["proxy", { ...saved, models: explicit ?? saved.models }]);
+        }
+      }
+      process.argv = ["node", "aih", "config", "pxpipe-models=changed-model"];
+      await main();
+      expect(manager.readState().config.proxyOptions.models).toBe("changed-model");
+      for (const command of ["start", "up"]) {
+        for (const [selected, expected] of [
+          [["proxy", "headroom", "ocx"], ["ocx", "headroom", "proxy"]],
+          [["ocx"], ["ocx"]],
+          [["agentmemory", "pxpipe"], ["agentmemory", "pxpipe"]],
+        ]) {
+          manager.saveState({ ...previous, config: { proxyOptions: saved, startServices: selected } });
+          calls.length = 0;
+          process.argv = ["node", "aih", command, "--json"];
+          await main();
+          expect(calls.map(([id]) => id)).toEqual(expected);
+        }
+        manager.saveState({ ...previous, config: { startServices: [] } });
+        calls.length = 0;
+        process.argv = ["node", "aih", command, "--json"];
+        await expect(main()).rejects.toThrow("Select at least one");
+        expect(calls).toEqual([]);
+        process.argv = ["node", "aih", command, "ocx", "--json"];
+        await main();
+        expect(calls.map(([id]) => id)).toEqual(["ocx"]);
+      }
+    } finally {
+      manager.saveState(previous);
       process.argv = original.argv;
       globalThis.fetch = original.fetch;
       console.log = original.log;

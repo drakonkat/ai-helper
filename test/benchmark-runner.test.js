@@ -206,6 +206,19 @@ test("real proxy Headroom integration counts captured payload, not advertised st
   assert.ok(received.every(r => r.config.mode === "lossy_inline"));
 });
 
+test("benchmark retains worker and final HTTP timings without duplicate stage events", async () => {
+  const run = await runBenchmark({ fixtures: [fixture()], presets: ["pxpipe"], repetitions: 1, warmup: 0 });
+  const row = run.records.find(r => r.preset === "pxpipe");
+  assert.equal(row.status, "ok");
+  assert.equal(row.stages.length, 1);
+  assert.equal(row.proxyTimings.state, "completed");
+  for (const key of ["presetMs", "pxpipeMs", "pxpipeQueueMs", "upstreamHeadersMs", "totalMs", "eventLoopLagMs"]) {
+    assert.ok(Number.isFinite(row.proxyTimings[key]) && row.proxyTimings[key] >= 0, key);
+  }
+  assert.ok(row.proxyTimings.totalMs >= row.proxyTimings.presetMs);
+  assert.equal(run.records.find(r => r.preset === "none").proxyTimings, null);
+});
+
 test("compressor failure is an error, not a free 100% saving", async t => {
   const headroomUrl = await serve(t, (_req, res) => { res.writeHead(503); res.end("not available"); });
   const report = buildReport(await runBenchmark({ fixtures: [fixture()], presets: ["headroom"], headroomUrl, repetitions: 1, warmup: 0 }));
