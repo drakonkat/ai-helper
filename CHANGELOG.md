@@ -4,6 +4,13 @@ All notable changes to **`ai-helper` (`aih`)** are documented in this file.
 
 ---
 
+## [1.2.16] - 2026-10-28
+
+### Changed
+- `aih update headroom` (and `aih headroom update`) now installs Headroom when it is missing, bootstrapping uv/Python via winget, Homebrew, apt-get or dnf as needed, instead of failing.
+
+---
+
 ## [1.2.15] - 2026-10-26
 
 ### Added
@@ -85,7 +92,7 @@ All notable changes to **`ai-helper` (`aih`)** are documented in this file.
 
 ---
 
-## [Unreleased]
+## [1.2.16] - 2026-10-28
 
 ### Added
 - Explicit managed-service updates with `aih <service> update`, `aih update [services...]`, and the live dashboard's `u` shortcut. Includes clean JSON results, target validation, running-service restart/recovery, and version-cache invalidation; automatic checks remain read-only.

@@ -3,6 +3,7 @@ import { readFile, realpath } from "node:fs/promises";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { baseUrl, fetchJson } from "./metrics.js";
 import { SERVICE_PACKAGES as PACKAGES } from "../config.js";
+import { refreshToolPath } from "./tool-path.js";
 
 function parseVersion(value) {
   if (typeof value !== "string") return null;
@@ -94,6 +95,8 @@ export async function readNpmVersionFromCommand(command, name) {
 async function getInstalledVersion(status, command) {
   const pkg = PACKAGES[status.id];
   if (pkg.pypi) {
+    // User-level installers (uv/pipx) put the binary where this process may not look yet.
+    refreshToolPath();
     // Headroom's Click CLI explicitly implements --version without starting a proxy.
     const output = await runVersionCommand("headroom", ["--version"]);
     return cleanVersion(output?.match(/^headroom, version\s+(\S+)$/im)?.[1]);

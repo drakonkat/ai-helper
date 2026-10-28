@@ -112,7 +112,7 @@ export class ServiceManager {
         details.version = live.version;
       }
       return { ...details, success: true, updated, restarted: Boolean(started), codexConfig: started?.codexConfig,
-        message: `'${serviceId}' updated to ${details.version}${started ? " and restarted" : " (left stopped)"}` };
+        message: `'${serviceId}' ${details.previousVersion == null ? "installed" : "updated"} to ${details.version}${started ? " and restarted" : " (left stopped)"}` };
     } catch (error) {
       const recovery = stopped ? await restart() : null;
       return { ...details, success: false, updated, restarted: Boolean(recovery?.success && !recovery.alreadyRunning), codexConfig: recovery?.codexConfig,

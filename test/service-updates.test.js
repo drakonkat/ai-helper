@@ -490,7 +490,8 @@ describe("installer output capture", () => {
 
   it("does not treat signal termination as installer success", async () => withLogHome(async () => {
     const child = fakeChild();
-    const pending = installServiceUpdate("headroom", { spawnImpl: () => child });
+    const pending = installServiceUpdate("headroom", { spawnImpl: () => child, probe: async () => "headroom, version 0.9.0", refreshPath: () => [] });
+    await new Promise(resolve => setTimeout(resolve, 0));
     child.emit("close", null, "SIGTERM");
     expect(await pending).toMatchObject({ success: false, exitCode: 1, message: "Installer terminated by SIGTERM" });
   }));

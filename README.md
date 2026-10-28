@@ -321,8 +321,14 @@ not by updating the separate `pxpipe` service.
 
 The Node services use `npm install --global <package>@latest` (`pxpipe-proxy`,
 `@bitkyc08/opencodex`, `@agentmemory/agentmemory`), so npm must be available and
-its global installation directory writable and on PATH. Headroom uses its own
+its global installation directory writable and on PATH. Headroom is updated with its own
 `headroom update --yes` command to respect the existing Python installation.
+**If Headroom is not installed, the same command installs it** on the machine running aih:
+with `uv tool install --python 3.12 "headroom-ai[proxy]"` when uv exists; otherwise uv is
+bootstrapped through Python 3.10+ (`python -m pip install --user uv`), and Python itself is
+installed first with winget (Windows), Homebrew (macOS) or apt-get/dnf (Linux, needs root or
+passwordless sudo). Tool directories are added to aih's PATH for the run and the first launch
+is warmed up before the version check; open a new terminal to get `headroom` on your shell PATH.
 Installer output is captured in `aih logs <service>` rather than mixed into
 JSON or the live dashboard. An explicitly updated npx service is launched with
 the verified package version so an older project dependency/cache cannot win.

@@ -13,7 +13,7 @@ export function npmUpdateInvocation(packageName, platform = process.platform) {
 }
 
 /** Capture installer output, keeping --json/TUI clean and full diagnostics in the log. */
-export function runUpdateInstaller(id, { command, args }, { spawnImpl = spawn } = {}) {
+export function runUpdateInstaller(id, { command, args }, { spawnImpl = spawn, env } = {}) {
   ensureDir(getLogsDir());
   const logPath = getServiceLogPath(id);
   const fd = openSync(logPath, "a");
@@ -37,7 +37,7 @@ export function runUpdateInstaller(id, { command, args }, { spawnImpl = spawn } 
     try {
       const child = spawnImpl(command, args, {
         windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env, CI: "1", npm_config_yes: "true", PIP_NO_INPUT: "1", NO_COLOR: "1" },
+        env: { ...process.env, CI: "1", npm_config_yes: "true", PIP_NO_INPUT: "1", NO_COLOR: "1", ...env },
       });
       child.stdout?.on("data", collect);
       child.stderr?.on("data", collect);
