@@ -60,7 +60,7 @@ function fixture() {
     { id: "client", label: "client", state: "static", detail: "AI agents / CLI" },
     { id: "proxy", label: "aih proxy", state: "running", detail: "http://127.0.0.1:8789" },
     { id: "rtk", label: "rtk (pipe)", state: "static", detail: "" },
-    { id: "pxpipe", label: "pxpipe (libreria)", state: "running", detail: "" },
+    { id: "pxpipe", label: "pxpipe (library)", state: "running", detail: "" },
     { id: "upstream", label: "upstream", state: "unknown", detail: "https://upstream.example/v1" },
   ];
   return d;
@@ -70,7 +70,9 @@ async function withRefresh(run) {
   const state = { now, services: [proxy()], snapshot: stats() };
   const getStatus = spyOn(manager, "getStatus").mockImplementation(async () => state.services);
   const time = spyOn(Date, "now").mockImplementation(() => state.now);
-  const d = new Dashboard({ getVersions: async () => ({}), getProxyStats: () => state.snapshot });
+  // Health probes are injected: pipeline tests stay offline and keep raw process states.
+  const d = new Dashboard({ getVersions: async () => ({}), getProxyStats: () => state.snapshot,
+    getHealth: async () => ({ state: "unverified", checkedAt: state.now }) });
   try {
     await run(d, state, getStatus);
   } finally {
@@ -89,24 +91,24 @@ describe("native proxy pipeline dashboard", () => {
 
   it("separates process state, live preset activity and cumulative native counters", () => {
     const result = output(fixture());
-    expect(result).toContain("metriche proxy AIH");
-    expect(result).toContain("aih proxy: processo attivo");
-    expect(result).toContain("pxpipe (libreria): processo attivo");
-    expect(result).toContain("upstream: non verificato");
-    expect(result).not.toContain(": verificato");
-    expect(result).toContain("Letti 0s fa");
-    expect(result).toContain("0.00 elab/s");
-    expect(result).toContain("Ultimo evento 1s fa");
-    expect(result).toContain("Dall'avvio dei contatori");
-    expect(result).toContain("Richieste 120");
-    expect(result).toContain("Modificate 96 (80.0%)");
-    expect(result).toContain("Errori preset 2");
-    expect(result).toContain("risparmio stimato 1.1k token (parziale)");
-    expect(result).toContain("rtk: 50 token");
-    expect(result).toContain("applicato 3/120");
-    expect(result).toContain("pxpipe: 1.0k token");
-    expect(result).toContain("non misurati 1");
-    expect(result).toContain("esclusi interceptor, cache e fatturazione");
+    expect(result).toContain("AIH proxy metrics");
+    expect(result).toContain("aih proxy: process running");
+    expect(result).toContain("pxpipe (library): process running");
+    expect(result).toContain("upstream: not verified");
+    expect(result).not.toContain(": verified");
+    expect(result).toContain("Read 0s ago");
+    expect(result).toContain("0.00 proc/s");
+    expect(result).toContain("Last event 1s ago");
+    expect(result).toContain("Since counters started");
+    expect(result).toContain("Requests 120");
+    expect(result).toContain("Changed 96 (80.0%)");
+    expect(result).toContain("Preset errors 2");
+    expect(result).toContain("estimated savings 1.1k tokens (partial)");
+    expect(result).toContain("rtk: 50 tokens");
+    expect(result).toContain("applied 3/120");
+    expect(result).toContain("pxpipe: 1.0k tokens");
+    expect(result).toContain("unmeasured 1");
+    expect(result).toContain("excludes interceptors, cache and billing");
     expect(result).not.toMatch(/Headroom|cached|Durata media|Token in\/s|\$|http:\/\//);
   });
 
@@ -115,23 +117,23 @@ describe("native proxy pipeline dashboard", () => {
     d.onKey("d");
     const result = output(d, now, 120);
     expect(d.showPipelineDetails).toBe(true);
-    expect(result).toContain("Fonte:");
+    expect(result).toContain("Source:");
     expect(result).toContain("proxy-stats.json");
     expect(result).toContain("http://127.0.0.1:8789");
     expect(result).toContain("https://upstream.example/v1");
-    expect(result).toContain("aih proxy: health non verificato");
-    expect(result).toContain("pxpipe (libreria): health non verificato");
-    expect(result).toContain("persistono ai riavvii");
-    expect(result).toContain("ultimo intervallo di 1.0 s");
-    expect(result).toContain("non tutto il traffico proxy");
-    expect(result).toContain("somma dei delta misurati per stadio; basi non sommabili");
-    expect(result).toContain("Errori preset != errori upstream");
-    expect(result).toContain("nessun conteggio globale delle richieste in corso");
-    expect(result).toContain("header (non primo token)");
-    expect(result).toContain("WS: solo tempo preset");
+    expect(result).toContain("aih proxy: health not verified");
+    expect(result).toContain("pxpipe (library): health not verified");
+    expect(result).toContain("persist across restarts");
+    expect(result).toContain("last interval 1.0 s");
+    expect(result).toContain("not all proxy traffic");
+    expect(result).toContain("sum of measured per-stage deltas; bases are not additive");
+    expect(result).toContain("Preset errors != upstream errors");
+    expect(result).toContain("no global count of in-flight requests");
+    expect(result).toContain("headers (not first token)");
+    expect(result).toContain("WS: preset time only");
     d.onKey("d");
     expect(d.showPipelineDetails).toBe(false);
-    expect(output(d)).not.toContain("Fonte:");
+    expect(output(d)).not.toContain("Source:");
     expect(output(d)).not.toContain("http://");
   });
 
@@ -141,34 +143,34 @@ describe("native proxy pipeline dashboard", () => {
     const result = output(d, now + 6000);
     expect(d.metricsStale(now + 5000)).toBe(false);
     expect(d.metricsStale(now + 5001)).toBe(true);
-    expect(result).toContain("Dati non aggiornati: ultimo campione 6s fa");
-    expect(result).toContain("Dall'avvio dei contatori (ultimo campione)");
-    expect(result).toContain("Richieste 120");
-    expect(result).toContain("attivita non disponibile");
-    expect(result).toContain("aih proxy: non verificato");
-    expect(result).not.toContain("processo attivo");
-    expect(result).not.toContain("0.00 elab/s");
-    expect(result).toContain("Stati della catena non aggiornati");
-    expect(stream(d, 160, Infinity, now + 6000)).toContain("(storico)");
+    expect(result).toContain("Stale data: last sample 6s ago");
+    expect(result).toContain("Since counters started (last sample)");
+    expect(result).toContain("Requests 120");
+    expect(result).toContain("activity unavailable");
+    expect(result).toContain("aih proxy: not verified");
+    expect(result).not.toContain("process running");
+    expect(result).not.toContain("0.00 proc/s");
+    expect(result).toContain("Chain states are stale");
+    expect(stream(d, 160, Infinity, now + 6000)).toContain("(historical)");
     expect(stream(d, 160, Infinity, now + 6000)).toContain("gpt-6-astra");
   });
 
   it("does not invent zeroes without samples or ratios without denominators", () => {
     const empty = new Dashboard();
-    expect(output(empty)).toContain("nessun campione");
-    expect(output(empty)).not.toMatch(/0\.0|Richieste 0|NaN|Infinity/);
-    expect(stream(empty)).toContain("nessun evento proxy disponibile");
+    expect(output(empty)).toContain("no sample");
+    expect(output(empty)).not.toMatch(/0\.0|Requests 0|NaN|Infinity/);
+    expect(stream(empty)).toContain("no proxy events available");
     const d = fixture();
     d.proxyStats = stats({ requests: 0, changed: 0, estimatedSavedTokens: undefined, updatedAt: "invalid" });
     d.rates = {};
     d.sampleMs = null;
     d.onKey("d");
     const result = output(d);
-    expect(result).toContain("Modificate 0 (-)");
-    expect(result).toContain("risparmio stimato - token");
-    expect(result).toContain("Ultimo evento -");
-    expect(result).toContain("- elab/s");
-    expect(result).toContain("in attesa del secondo campione");
+    expect(result).toContain("Changed 0 (-)");
+    expect(result).toContain("estimated savings - tokens");
+    expect(result).toContain("Last event -");
+    expect(result).toContain("- proc/s");
+    expect(result).toContain("waiting for the second sample");
     expect(result).not.toMatch(/NaN|Infinity/);
   });
 
@@ -177,9 +179,9 @@ describe("native proxy pipeline dashboard", () => {
     for (const width of [40, 80, 100]) {
       const lines = d.pipelineLines(width, now).map(stripAnsi);
       expect(lines.every(line => line.length <= width)).toBe(true);
-      expect(lines.join("\n")).toContain("Modificate 96 (80.0%)");
-      expect(lines.join("\n")).toContain("Errori preset 2");
-      expect(lines.join("\n")).toContain("upstream: non verificato");
+      expect(lines.join("\n")).toContain("Changed 96 (80.0%)");
+      expect(lines.join("\n")).toContain("Preset errors 2");
+      expect(lines.join("\n")).toContain("upstream: not verified");
     }
     const { columns, rows } = process.stdout;
     try {
@@ -192,14 +194,14 @@ describe("native proxy pipeline dashboard", () => {
       expect(lines.length).toBe(24);
       expect(lines.every(line => line.length <= 40)).toBe(true);
       const footer = lines.slice(-6).join("\n");
-      for (const control of ["d riduci", "q esci", "s start", "x stop", "r restart", "k kill", "o dashboard", "g GitHub"]) {
+      for (const control of ["d less", "q quit", "s start", "x stop", "r restart", "k kill", "o dashboard", "g GitHub"]) {
         expect(footer).toContain(control);
       }
-      expect(lines[23]).toBe("pronto");
-      expect(lines.join("\n")).toContain("aumenta l'altezza");
+      expect(lines[23]).toBe("ready");
+      expect(lines.join("\n")).toContain("enlarge the terminal");
       expect(lines.join("\n")).toContain("PIPELINE");
-      expect(lines.join("\n")).toContain("STREAM RICHIESTE");
-      d.statuses.push(...["ocx", "agentmemory", "headroom"].map(id => ({
+      expect(lines.join("\n")).toContain("REQUEST STREAM");
+      d.statuses.push(...["ocx", "hindsight", "headroom"].map(id => ({
         id, status: "running", pid: 456, uptime: "1h", url: "http://127.0.0.1:9000",
       })));
       for (const [width, height] of [[60, 20], [40, 12]]) {
@@ -209,11 +211,11 @@ describe("native proxy pipeline dashboard", () => {
         expect(compact).toHaveLength(height);
         expect(compact.every(line => line.length <= width)).toBe(true);
         expect(compact.join("\n")).toContain("PIPELINE");
-        expect(compact.join("\n")).toContain("STREAM RICHIESTE");
-        expect(compact.join("\n")).toContain("d riduci");
-        expect(compact.join("\n")).toContain("q esci");
+        expect(compact.join("\n")).toContain("REQUEST STREAM");
+        expect(compact.join("\n")).toContain("d less");
+        expect(compact.join("\n")).toContain("q quit");
         expect(compact.join("\n")).toContain("k kill");
-        expect(compact.at(-1)).toBe("pronto");
+        expect(compact.at(-1)).toBe("ready");
       }
     } finally {
       process.stdout.columns = columns;
@@ -232,32 +234,32 @@ describe("native request stream", () => {
       request({ model: "failed-model", preset: "headroom", error: true, saved: null, stages: [] }),
     ];
     const result = stream(d);
-    expect(result).toContain("STREAM RICHIESTE");
-    expect(result).toContain("proxy AIH / elaborazioni preset");
-    for (const value of ["HTTP", "WS", "gpt-6-astra", "ws-model", "rtk-pxpipe", "modificata", "invariata", "errore preset", "below threshold"]) {
+    expect(result).toContain("REQUEST STREAM");
+    expect(result).toContain("AIH proxy / preset processing");
+    for (const value of ["HTTP", "WS", "gpt-6-astra", "ws-model", "rtk-pxpipe", "changed", "unchanged", "preset error", "below threshold"]) {
       expect(result).toContain(value);
     }
     expect(result).not.toMatch(/savings_events|\.headroom|\$|efficienza|cache \d|ms/);
     const failed = text(d.requestLines(d.events[2], 160));
-    expect(failed).not.toMatch(/tok|non misurato|parziale/);
+    expect(failed).not.toMatch(/tok|not measured|partial/);
   });
 
   it("shows timing units, HTTP outcomes and unknown legacy/WS timings within the terminal width", () => {
     const d = fixture();
     const event = request({ timings: { presetMs: 125, pxpipeQueueMs: 20, pxpipeMs: 100, pxpipeCpuMs: 80, eventLoopLagMs: 25, upstreamHeadersMs: 1500, totalMs: 5250, statusCode: 503, state: "completed" } });
     const result = text(d.requestLines(event, 160));
-    for (const value of ["proxy: 125ms", "coda: 20ms", "pxpipe: 100ms", "CPU: 80ms", "loop max: 25ms", "header: 1.5s", "tot: 5.3s", "HTTP 503"]) expect(result).toContain(value);
-    expect(text(d.requestLines(request(), 160))).toContain("tempi: n/d");
+    for (const value of ["proxy: 125ms", "queue: 20ms", "pxpipe: 100ms", "CPU: 80ms", "max loop lag: 25ms", "header: 1.5s", "tot: 5.3s", "HTTP 503"]) expect(result).toContain(value);
+    expect(text(d.requestLines(request(), 160))).toContain("timings: n/a");
     const ws = text(d.requestLines(request({ transport: "WS", timings: { presetMs: 0 } }), 160));
     expect(ws).toContain("proxy: 0ms");
-    expect(ws).toContain("risposta WS: n/d");
+    expect(ws).toContain("WS response: n/a");
     expect(ws).not.toContain("tot:");
-    for (const [state, label] of Object.entries({ waiting: "attesa esito", responding: "risposta iniziata", error: "errore proxy/trasporto", aborted: "interrotta" })) {
+    for (const [state, label] of Object.entries({ waiting: "awaiting outcome", responding: "response started", error: "proxy/transport error", aborted: "aborted" })) {
       const pending = request({ timings: { presetMs: 0, state } });
       const rendered = text(d.requestLines(pending, 160));
       expect(rendered).toContain(label);
-      expect(rendered).toContain("header: n/d");
-      expect(rendered).toContain("tot: n/d");
+      expect(rendered).toContain("header: n/a");
+      expect(rendered).toContain("tot: n/a");
     }
     for (const width of [40, 80, 160]) {
       expect(d.requestLines(event, width).map(stripAnsi).every(line => line.length <= width)).toBe(true);
@@ -272,9 +274,9 @@ describe("native request stream", () => {
     d.onKey("d");
     const result = text(d.requestLines(request(), 160));
     expect(result).toContain("-250 tok");
-    expect(result).toContain("rtk: applicato");
+    expect(result).toContain("rtk: applied");
     expect(result).toContain("200 -> 150 tok (25.0%)");
-    expect(result).toContain("pxpipe: applicato");
+    expect(result).toContain("pxpipe: applied");
     expect(result).toContain("1.0k -> 800 tok (20.0%)");
     expect(result).toContain("gpt-tokenizer");
     expect(result).toContain("rendered");
@@ -292,11 +294,11 @@ describe("native request stream", () => {
     const unknown = tokenStage("pxpipe", null, null, false, "not measured", "unavailable");
     // Recorder stores zero as the sum of measured deltas even if none exist.
     const unmeasured = request({ saved: 0, stages: [unknown] });
-    expect(text(d.requestLines(unmeasured, 160))).toContain("non misurato");
+    expect(text(d.requestLines(unmeasured, 160))).toContain("not measured");
     expect(text(d.requestLines(unmeasured, 160))).not.toContain("0 tok");
-    expect(text(d.requestLines(request({ saved: null, stages: [] }), 160))).toContain("non misurato");
+    expect(text(d.requestLines(request({ saved: null, stages: [] }), 160))).toContain("not measured");
     const partial = request({ saved: 50, stages: [request().stages[0], unknown] });
-    expect(text(d.requestLines(partial, 160))).toContain("-50 tok (parziale)");
+    expect(text(d.requestLines(partial, 160))).toContain("-50 tok (partial)");
     d.onKey("d");
     const result = text(d.requestLines(partial, 160));
     expect(result).toContain("pxpipe: bypass");
@@ -321,7 +323,7 @@ describe("native request stream", () => {
         expect(lines.map(stripAnsi).every(line => !/[\x00-\x1f\x7f-\x9f]/.test(line))).toBe(true);
         expect(text(lines)).toContain("--:--:--");
         expect(text(lines)).toContain("WS");
-        expect(text(lines)).toContain("modificata");
+        expect(text(lines)).toContain("changed");
         expect(text(lines)).toContain("reason");
       }
     }
@@ -347,10 +349,10 @@ describe("native request stream", () => {
   it("differentiates an empty recorder from preset none, which cannot report all proxy traffic", () => {
     const d = fixture();
     d.events = [];
-    expect(stream(d)).toContain("in attesa di richieste elaborate dai preset");
+    expect(stream(d)).toContain("waiting for requests processed by presets");
     d.statuses[0].proxyOptions.preset = "none";
-    expect(output(d)).toContain("Preset none: traffico non registrato nelle metriche");
-    expect(stream(d)).toContain("preset none: nessun evento di elaborazione");
+    expect(output(d)).toContain("Preset none: traffic not recorded in metrics");
+    expect(stream(d)).toContain("preset none: no processing events");
   });
 });
 
@@ -401,10 +403,10 @@ describe("native snapshot refresh", () => {
       expect(d.metricsStale(state.now)).toBe(false);
       expect(d.rates.requests).toBe(0);
       const result = output(d, state.now);
-      expect(result).toContain("Letti 0s fa");
-      expect(result).toContain("Ultimo evento 1h fa");
-      expect(result).not.toContain("Dati non aggiornati");
-      expect(stream(d, 160, Infinity, state.now)).not.toContain("(storico)");
+      expect(result).toContain("Read 0s ago");
+      expect(result).toContain("Last event 1h ago");
+      expect(result).not.toContain("Stale data");
+      expect(stream(d, 160, Infinity, state.now)).not.toContain("(historical)");
     });
   });
 
@@ -442,8 +444,8 @@ describe("native snapshot refresh", () => {
       expect(d.events).toEqual(good.recent);
       expect(d.rates).toEqual({});
       expect(d.prevMetrics).toBeNull();
-      expect(d.metricsError).toBe("Statistiche proxy assenti o non valide");
-      expect(output(d, state.now)).toContain("attivita non disponibile");
+      expect(d.metricsError).toBe("Proxy statistics missing or invalid");
+      expect(output(d, state.now)).toContain("activity unavailable");
       state.now += 1000;
       state.snapshot = stats({ requests: 150 });
       await d.refresh();
@@ -452,7 +454,7 @@ describe("native snapshot refresh", () => {
       getStatus.mockRejectedValue(new Error("status failed"));
       await d.refresh();
       expect(d.refreshing).toBe(false);
-      expect(d.metricsError).toBe("aggiornamento fallito");
+      expect(d.metricsError).toBe("refresh failed");
       expect(d.rates).toEqual({});
       expect(d.prevMetrics).toBeNull();
       expect(d.chainAt).toBeNull();
@@ -465,7 +467,7 @@ describe("native snapshot refresh", () => {
       d.getProxyStats = () => { throw new Error("read unavailable"); };
       state.now += 1000;
       await d.refresh();
-      expect(d.metricsError).toBe("aggiornamento fallito");
+      expect(d.metricsError).toBe("refresh failed");
       expect(d.refreshing).toBe(false);
       expect(d.status).toContain("read unavailable");
       d.getProxyStats = () => state.snapshot;
@@ -487,7 +489,7 @@ describe("native snapshot refresh", () => {
         expect(d.chain.find(node => node.id === "upstream").state).toBe("unknown");
         state.services = state.services.filter(service => service.id !== "proxy");
         await d.refresh();
-        expect(d.metricsError).toBe("Proxy AIH non configurato");
+        expect(d.metricsError).toBe("AIH proxy not configured");
         expect(d.rates).toEqual({});
         expect(d.chain.find(node => node.id === "proxy").state).toBe("unknown");
         expect(d.chain.some(node => node.id === "headroom")).toBe(false);
@@ -502,13 +504,13 @@ describe("native snapshot refresh", () => {
     await withRefresh(async (d, state) => {
       state.services[0].status = "stopped";
       await d.refresh();
-      expect(d.metricsError).toBe("Proxy AIH non in esecuzione");
+      expect(d.metricsError).toBe("AIH proxy not running");
       expect(d.proxyStats.requests).toBe(120);
       expect(d.rates).toEqual({});
-      expect(output(d)).toContain("aih proxy: fermo");
-      expect(output(d)).toContain("Richieste 120");
-      expect(output(d)).toContain("(ultimo campione)");
-      expect(stream(d)).toContain("(storico)");
+      expect(output(d)).toContain("aih proxy: stopped");
+      expect(output(d)).toContain("Requests 120");
+      expect(output(d)).toContain("(last sample)");
+      expect(stream(d)).toContain("(historical)");
       expect(stream(d)).toContain("gpt-6-astra");
       state.services[0].status = "running";
       state.now += 1000;
@@ -527,7 +529,7 @@ describe("native snapshot refresh", () => {
         await d.refresh();
         expect(d.proxyStats).toBeNull();
         expect(d.metricsAt).toBeNull();
-        expect(d.metricsError).toBe("Statistiche proxy assenti o non valide");
+        expect(d.metricsError).toBe("Proxy statistics missing or invalid");
         writeFileSync(file, JSON.stringify(stats()));
         state.now += 1000;
         await d.refresh();
@@ -539,11 +541,11 @@ describe("native snapshot refresh", () => {
           writeFileSync(file, invalid);
           state.now += 1000;
           await d.refresh();
-          expect(d.metricsError).toBe("Statistiche proxy assenti o non valide");
+          expect(d.metricsError).toBe("Proxy statistics missing or invalid");
           expect(d.metricsAt).toBe(savedAt);
           expect(d.proxyStats.requests).toBe(120);
           expect(d.rates).toEqual({});
-          expect(stream(d, 160, Infinity, state.now)).toContain("(storico)");
+          expect(stream(d, 160, Infinity, state.now)).toContain("(historical)");
         }
         writeFileSync(file, JSON.stringify(stats({ requests: 160 })));
         state.now += 1000;
@@ -553,7 +555,7 @@ describe("native snapshot refresh", () => {
         expect(d.rates.requests).toBeNull();
         unlinkSync(file);
         await d.refresh();
-        expect(d.metricsError).toBe("Statistiche proxy assenti o non valide");
+        expect(d.metricsError).toBe("Proxy statistics missing or invalid");
         expect(d.proxyStats.requests).toBe(160);
       });
     } finally {

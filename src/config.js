@@ -30,17 +30,18 @@ export const SERVICES = {
     defaultUrl: "http://localhost:10100",
     ports: [10100],
   },
-  agentmemory: {
-    id: "agentmemory",
-    name: "agentmemory",
-    command: "npx @agentmemory/agentmemory",
-    stopCommand: "npx @agentmemory/agentmemory stop --force",
-    repositoryUrl: "https://github.com/rohitg00/agentmemory",
-    description: "Long-term persistent agent memory service (@agentmemory/agentmemory)",
-   defaultPort: 3113,
-   defaultUrl: "http://localhost:3113",
-   ports: [3111, 3112, 3113, 49134],
- },
+  hindsight: {
+    id: "hindsight",
+    name: "hindsight",
+    // Docker container, not a host process: no PID, port cleanup or npm updates.
+    runtime: "docker",
+    command: "docker container hindsight",
+    repositoryUrl: "https://github.com/vectorize-io/hindsight",
+    description: "Long-term agent memory in Docker (vectorize-io/hindsight; API :8888, UI :9999)",
+    defaultPort: 9999,
+    defaultUrl: "http://localhost:9999",
+    ports: [],
+  },
   headroom: {
     id: "headroom",
     name: "headroom",
@@ -59,7 +60,6 @@ export const SERVICE_IDS = Object.keys(SERVICES);
 export const SERVICE_PACKAGES = {
   pxpipe: { name: "pxpipe-proxy", bin: "pxpipe", npx: true },
   ocx: { name: "@bitkyc08/opencodex", bin: "ocx", health: "/healthz", service: "opencodex" },
-  agentmemory: { name: "@agentmemory/agentmemory", bin: "agentmemory", npx: true, health: "/agentmemory/health", service: "agentmemory" },
   headroom: { name: "headroom-ai", bin: "headroom", health: "/health", pypi: true },
 };
 

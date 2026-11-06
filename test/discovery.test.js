@@ -14,8 +14,6 @@ const discover = (Procs, Ports, options = {}) => discoverWindowsProcesses(
   { currentPid: 99999, isRunning: () => true, ...options },
 );
 const pxpipeCommand = String.raw`node "C:\Users\tester\AppData\Roaming\npm\node_modules\pxpipe-proxy\bin\cli.js"`;
-const memoryCommand = String.raw`node "C:\Users\tester\AppData\Roaming\npm\node_modules\@agentmemory\agentmemory\dist\cli.mjs" start`;
-const engineCommand = String.raw`"C:\Users\tester\.agentmemory\bin\iii.exe" --config "C:\Users\tester\.agentmemory\iii-config.yaml"`;
 
 function expectListener(result, service, pid, port, path = "") {
   expect(result[service]).toMatchObject({
@@ -67,44 +65,16 @@ describe("discoverWindowsProcesses", () => {
     });
   }
 
-  for (const anchor of [3111, 4000]) {
-    for (const reversed of [false, true]) {
-      it(`uses the agentmemory viewer owner across split processes at anchor ${anchor}, reversed=${reversed}`, () => {
-        const processes = [proc(30, 1, "node.exe", memoryCommand), proc(31, 30, "iii.exe", engineCommand)];
-        const ports = [
-          listener(31, anchor + 46023),
-          listener(31, anchor),
-          listener(31, anchor + 1),
-          listener(30, anchor + 2),
-        ];
-        const result = discover(reversed ? processes.toReversed() : processes, reversed ? ports.toReversed() : ports);
-
-        expectListener(result, "agentmemory", 30, anchor + 2);
-        expect(result.agentmemory.command).toBe(memoryCommand);
-      });
-    }
-  }
-
-  it("does not add two to a standalone agentmemory viewer's listening port", () => {
-    const result = discover([proc(30, 1, "node.exe", memoryCommand)], [listener(30, 3113)]);
-    expectListener(result, "agentmemory", 30, 3113);
-  });
-
-  it.each([3111, 4000])("resolves an elevated agentmemory tree with a stale known port at anchor %i", anchor => {
-    const result = discover([
-      proc(31, 30, "iii.exe", null),
-      proc(30, 29, "node.exe", null),
-      proc(29, 1, "powershell.exe", null),
-    ], [
-      listener(31, anchor + 46023),
-      listener(31, anchor),
-      listener(31, anchor + 1),
-      listener(30, anchor + 2),
-    ], {
-      knownServices: { agentmemory: { pid: 30, port: 3115, url: "http://localhost:3115" } },
-    });
-
-    expectListener(result, "agentmemory", 30, anchor + 2);
+  it("never treats Docker Desktop port owners or legacy agentmemory processes as services", () => {
+    // Hindsight is tracked by container state; on Windows its ports belong to Docker itself.
+    const processes = [
+      proc(30, 1, "com.docker.backend.exe", "com.docker.backend.exe"),
+      proc(31, 1, "wslrelay.exe", "wslrelay.exe --mode 1"),
+      proc(32, 1, "node.exe", String.raw`node "C:\npm\node_modules\@agentmemory\agentmemory\dist\cli.mjs" start`),
+      proc(33, 32, "iii.exe", String.raw`"C:\Users\tester\.agentmemory\bin\iii.exe" --config iii-config.yaml`),
+    ];
+    const ports = [listener(30, 8888), listener(31, 9999), listener(32, 3113), listener(33, 49134)];
+    expect(discover(processes, ports, { knownServices: { hindsight: { pid: 30 } } })).toEqual({});
   });
 
   it.each(["node.exe", "bun.exe"])("follows an elevated OCX shell to its listening %s descendant", name => {

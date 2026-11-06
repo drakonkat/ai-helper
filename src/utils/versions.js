@@ -2,7 +2,8 @@ import { execFile } from "node:child_process";
 import { readFile, realpath } from "node:fs/promises";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { baseUrl, fetchJson } from "./metrics.js";
-import { SERVICE_PACKAGES as PACKAGES } from "../config.js";
+import { SERVICE_PACKAGES as PACKAGES, SERVICES } from "../config.js";
+import { HINDSIGHT_RELEASES_URL } from "../hindsight.js";
 import { refreshToolPath } from "./tool-path.js";
 
 function parseVersion(value) {
@@ -136,10 +137,22 @@ export async function getServiceVersions(statuses, {
   processCommands = getProcessCommands,
   installedVersion = getInstalledVersion,
 } = {}) {
+  const docker = (statuses || []).filter(status => SERVICES[status.id]?.runtime === "docker");
   const services = (statuses || []).filter(status => PACKAGES[status.id]);
   let commands;
   const readCommands = () => commands ||= Promise.resolve().then(() => processCommands(services)).catch(() => ({}));
-  return Object.fromEntries(await Promise.all(services.map(async status => {
+  // Docker images: the running API reports its version; releases come from GitHub.
+  const dockerVersions = docker.map(async status => {
+    const [version, latestVersion] = await Promise.all([
+      status.status === "running" && baseUrl(status.apiUrl)
+        ? request(`${baseUrl(status.apiUrl)}/health/live`, 2000).then(data => cleanVersion(data?.version)).catch(() => null)
+        : null,
+      request(HINDSIGHT_RELEASES_URL, 3000).then(data => cleanVersion(data?.tag_name)).catch(() => null),
+    ]);
+    const comparison = compareVersions(version, latestVersion);
+    return [status.id, { version, latestVersion, updateAvailable: comparison === null ? null : comparison < 0 }];
+  });
+  return Object.fromEntries(await Promise.all([...dockerVersions, ...services.map(async status => {
     const pkg = PACKAGES[status.id];
     const latest = (async () => {
       try {
@@ -164,5 +177,5 @@ export async function getServiceVersions(statuses, {
     const [version, latestVersion] = await Promise.all([installed, latest]);
     const comparison = compareVersions(version, latestVersion);
     return [status.id, { version, latestVersion, updateAvailable: comparison === null ? null : comparison < 0 }];
-  })));
+  })]));
 }

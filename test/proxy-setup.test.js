@@ -32,7 +32,7 @@ test("startup selection validates services and puts dependencies before the prox
 
 test("startup step toggles multiple services, preserves edits on back and detects cancellation", () => {
   const w = new ProxySetupWizard(state());
-  w.step = w.fields.length - 1;
+  w.step = w.fields.findIndex(f => f.key === "startServices");
   assert.equal(w.field.key, "startServices");
   assert.equal(w.draft.startServices, DEFAULT_START_SERVICES.join(","));
   assert.match(w.lines(100, 40).join("\n"), /> \[x\] ocx/);
@@ -50,7 +50,7 @@ test("startup step toggles multiple services, preserves edits on back and detect
   w.handle("\x1b"); assert.equal(w.cancelPending, true);
   assert.equal(w.handle("\r"), "cancel");
   const empty = new ProxySetupWizard(state());
-  empty.step = empty.fields.length - 1;
+  empty.step = empty.fields.findIndex(f => f.key === "startServices");
   empty.draft.startServices = "";
   empty.handle("\r");
   assert.equal(empty.summary, false);
@@ -117,7 +117,7 @@ test("wizard separates editable draft, initial value and actual configuration fo
   w.draft.upstream = "http://127.0.0.1:12000";
   w.cursor = w.draft.upstream.length;
   const screen = w.lines(100, 30).join("\n");
-  assert.match(screen, /PROXY SETUP \| Connection/);
+  assert.match(screen, /AIH SETUP \| Connection/);
   assert.match(screen, /Initial value: http:\/\/127\.0\.0\.1:11000\//);
   assert.match(screen, /Current setting: http:\/\/127\.0\.0\.1:10100\//);
   assert.match(screen, /> http:\/\/127\.0\.0\.1:12000/);

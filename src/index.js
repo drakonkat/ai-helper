@@ -34,7 +34,7 @@ ${bold("COMMANDS:")}
   ${yellow("status")}, ${yellow("ps")} [services...]   Show status, PID, uptime, dashboards and repositories
   ${yellow("status -ui")}                 Interactive live dashboard: manage services and watch the AI pipeline
   ${yellow("open")}, ${yellow("dash")} [services...]   Open web dashboard(s) directly in your default browser
-  ${yellow("start")}, ${yellow("up")} [services...]    Start ocx, agentmemory and the pxpipe proxy, or specified services
+  ${yellow("start")}, ${yellow("up")} [services...]    Start ocx, hindsight and the pxpipe proxy, or specified services
   ${yellow("start proxy")} [upstream]      Start HTTP/SSE/WebSocket proxy; first start requires upstream
   ${yellow("stop")}, ${yellow("down")} [services...]   Stop all or specified services
   ${yellow("restart")} [services...]       Restart all or specified services
@@ -50,7 +50,7 @@ ${bold("COMMANDS:")}
   ${yellow("help")}, ${yellow("-h")}, ${yellow("--help")}           Show this help message
 
   Other aliases: status = ls/list; open = dashboard; logs = log.
-  Service lists use spaces: ocx agentmemory. Omitting the command shows status.
+  Service lists use spaces: ocx hindsight. Omitting the command shows status.
 
 ${bold("SERVICES MANAGED:")}
 ${SERVICE_IDS.map(id => {
@@ -58,6 +58,15 @@ ${SERVICE_IDS.map(id => {
   return `  ${cyan(svc.id.padEnd(14))} ${svc.description} ${dim(`(${svc.defaultUrl})`)}`;
 }).join("\n")}
   ${cyan("proxy".padEnd(14))} Built-in HTTP/SSE/WebSocket proxy (no web dashboard)
+
+${bold("HINDSIGHT (DOCKER):")}
+  hindsight runs as a Docker container (default name: hindsight, image ghcr.io/vectorize-io/hindsight).
+  Requires Docker Desktop/Engine. start creates or starts the container and waits for /health;
+  stop runs docker stop (data stays in the hindsight-data volume); logs shows docker logs.
+  Configure container, ports, LLM provider/model/base URL and API key in status --ui (c),
+  after selecting hindsight in the Startup step. The key is kept in ~/.aih/hindsight.env;
+  HINDSIGHT_API_LLM_API_KEY from the environment is used when no key is saved.
+  update pulls the image and recreates only containers created by aih.
 
 ${bold("OPTIONS:")}
   ${gray("-n, --lines <num>")}     Number of log lines to show (logs only; default: 50)
@@ -84,7 +93,7 @@ ${bold("PROXY OPTIONS (start/up/restart proxy):")}
 
 ${bold("START DEFAULTS AND MODEL VALUES:")}
   Without service targets, start/up uses the Startup selection saved in status --ui setup.
-  Until configured, it launches ocx, agentmemory, then proxy with:
+  Until configured, it launches ocx, hindsight, then proxy with:
     upstream: http://127.0.0.1:10100/   listen: http://127.0.0.1:10102   preset: pxpipe
     models: gpt-6-astra,google-antigravity/gemini-3.8*,anthropic/claude-fable*
   config pxpipe-models=<list> saves a replacement list; --models overrides it.
@@ -98,7 +107,7 @@ ${bold("START DEFAULTS AND MODEL VALUES:")}
 ${bold("SELF AND SERVICE UPDATES:")}
   'update' without targets updates aih's global npm installation, not managed services.
   Standalone executables must be rebuilt; npm updates do not replace them.
-  To update all managed services: aih update pxpipe ocx agentmemory headroom
+  To update all managed services: aih update pxpipe ocx hindsight headroom
   In the live dashboard, select a service with up/down and press u to update it.
   Only running services are restarted; stopped services stay stopped.
 
@@ -110,7 +119,7 @@ ${bold("EXAMPLES - STATUS, DASHBOARDS AND LOGS:")}
   ${dim("$")} ${cyan("npx @drakonkat/ai-helper")} status
   ${dim("$")} ${cyan(CLI_NAME)} status ocx proxy --json
   ${dim("$")} ${cyan(CLI_NAME)} status --ui
-  ${dim("$")} ${cyan(CLI_NAME)} open agentmemory
+  ${dim("$")} ${cyan(CLI_NAME)} open hindsight
   ${dim("$")} ${cyan(CLI_NAME)} open ocx proxy --repo
   ${dim("$")} ${cyan(CLI_NAME)} logs proxy --lines 100 --follow
   ${dim("$")} ${cyan(CLI_NAME)} logs ocx -n=20
@@ -123,12 +132,12 @@ ${bold("EXAMPLES - START, STOP AND UPDATE:")}
   ${dim("$")} ${cyan(CLI_NAME)} start --models "gpt-6-astra,anthropic/claude-fable*" --json
   ${dim("$")} ${cyan(CLI_NAME)} up --models="google-antigravity/gemini-3.8*"
   ${dim("$")} ${cyan(CLI_NAME)} start --models=   ${dim("# Use pxpipe's default model selection")}
-  ${dim("$")} ${cyan(CLI_NAME)} start ocx agentmemory
-  ${dim("$")} ${cyan(CLI_NAME)} stop ocx agentmemory proxy
+  ${dim("$")} ${cyan(CLI_NAME)} start ocx hindsight
+  ${dim("$")} ${cyan(CLI_NAME)} stop ocx hindsight proxy
   ${dim("$")} ${cyan(CLI_NAME)} restart ocx --json
   ${dim("$")} ${cyan(CLI_NAME)} update           ${dim("# Update aih itself from npm")}
   ${dim("$")} ${cyan(CLI_NAME)} ocx update
-  ${dim("$")} ${cyan(CLI_NAME)} update ocx agentmemory --json
+  ${dim("$")} ${cyan(CLI_NAME)} update ocx hindsight --json
   ${dim("$")} ${cyan(CLI_NAME)} install          ${dim("# Build/install standalone binary; requires Bun")}
 
 ${bold("EXAMPLES - PROXY CONFIGURATION:")}
@@ -149,6 +158,12 @@ function printVersion() {
 function printCodexConfig(result) {
   const config = result.codexConfig;
   if (config?.message) console.log((config.status === "warning" ? yellow : dim)(`  ${config.message}`));
+}
+
+/** Host processes have a PID; Docker services have a container and a health result. */
+function startedDetail(result) {
+  if (result.pid) return `PID: ${result.pid}`;
+  return [result.containerId && `container ${result.containerId}`, result.health?.state && `health: ${result.health.state}`].filter(Boolean).join(", ") || "-";
 }
 
 async function runInstall() {
@@ -479,9 +494,9 @@ export async function main({ updateSelfImpl = updateSelf } = {}) {
         if (jsonOutput) continue;
         if (res.success) {
           if (res.alreadyRunning) {
-            console.log(yellow(`already running (PID: ${res.pid})`));
+            console.log(yellow(`already running (${startedDetail(res)})`));
           } else {
-            console.log(green(`started (PID: ${res.pid})`));
+            console.log(green(`started (${startedDetail(res)})`));
           }
         } else {
           console.log(red(`failed: ${res.message}`));
@@ -523,7 +538,7 @@ export async function main({ updateSelfImpl = updateSelf } = {}) {
         results.push({ id, ...res });
         if (jsonOutput) continue;
         if (res.success) {
-          console.log(green(`started (PID: ${res.pid})`));
+          console.log(green(`started (${startedDetail(res)})`));
         } else {
           console.log(red(`failed: ${res.message}`));
         }

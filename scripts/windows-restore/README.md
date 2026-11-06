@@ -42,7 +42,7 @@ Se WinGet non e' disponibile, puoi installare/aggiornare **App Installer** dal M
 
 ## Cosa installa
 
-- **Sviluppo:** Git, NVM for Windows, Node LTS x64 tramite NVM, `@drakonkat/ai-helper`, **OpenCodex (`@bitkyc08/opencodex`)**, **pxpipe (`pxpipe-proxy`)**, **`@agentmemory/agentmemory`**, JetBrains Toolbox, WebStorm, PhpStorm, Codex **Desktop**, Claude **Desktop**, Docker Desktop.
+- **Sviluppo:** Git, NVM for Windows, Node LTS x64 tramite NVM, `@drakonkat/ai-helper`, **OpenCodex (`@bitkyc08/opencodex`)**, **pxpipe (`pxpipe-proxy`)**, JetBrains Toolbox, WebStorm, PhpStorm, Codex **Desktop**, Claude **Desktop**, Docker Desktop.
 - **Personale:** Telegram, Steam, Discord, Teams attuale (accesso con account personale), Chrome, Brave, Google Drive.
 - **Utility/periferiche:** Notepad++, G HUB, ShareX, SteelSeries GG, Ditto, PowerToys, iCUE 5.
 - **WhatsApp Web:** collegamento nel menu Start che apre `https://web.whatsapp.com/` nel browser predefinito, **non WhatsApp Desktop**. Se preferisci una PWA installala dal browser; resta necessario il QR/login.
@@ -51,18 +51,18 @@ Se WinGet non e' disponibile, puoi installare/aggiornare **App Installer** dal M
 
 I pacchetti sono nel CSV modificabile. Le versioni applicative vengono risolte dai cataloghi al momento dell'installazione; non e' un mirror offline. Le app gia' riconosciute dal package manager sono saltate, **non aggiornate o reinstallate forzatamente**. Restando sullo stesso manager lo script e' rieseguibile. Non alternare WinGet/Chocolatey su app gia' presenti: Chocolatey puo' non riconoscere un'installazione WinGet/manuale e duplicarla.
 
-`NodeVersion=lts` risolve la LTS piu' recente dal catalogo ufficiale Node.js a ogni esecuzione: per risultati ripetibili specifica una versione esatta. Non installa Node standalone in parallelo a NVM, non cancella directory/symlink in conflitto. Le global npm appartengono alla versione Node selezionata. Per i quattro tool npm, `latest` conserva una copia gia' presente; per cambiarla indica `-AihVersion`, `-OpenCodexVersion`, `-PxpipeVersion` o `-AgentMemoryVersion` con una versione esplicita, oppure aggiorna con npm. Le installazioni mancanti usano la release corrente e verificano sia il pacchetto sia il comando sul PATH.
+`NodeVersion=lts` risolve la LTS piu' recente dal catalogo ufficiale Node.js a ogni esecuzione: per risultati ripetibili specifica una versione esatta. Non installa Node standalone in parallelo a NVM, non cancella directory/symlink in conflitto. Le global npm appartengono alla versione Node selezionata. Per i tre tool npm, `latest` conserva una copia gia' presente; per cambiarla indica `-AihVersion`, `-OpenCodexVersion` o `-PxpipeVersion` con una versione esplicita, oppure aggiorna con npm. Le installazioni mancanti usano la release corrente e verificano sia il pacchetto sia il comando sul PATH.
 
-La fase **Node** predispone `aih`, `ocx`, `pxpipe` e `agentmemory`: **non viene avviato alcun servizio AI** durante il restore. Nel codice ai-helper corrente, `aih start` senza argomenti avvia **ocx, agentmemory e il proxy integrato con preset pxpipe**; il proxy ascolta su `127.0.0.1:10102` e inoltra a OpenCodex su `127.0.0.1:10100`. Il pacchetto standalone `pxpipe-proxy` richiesto e' installato anche per `aih start pxpipe` (porta 47821), ma non va confuso con il proxy integrato. Non servono due processi pxpipe per il semplice `aih start`.
+La fase **Node** predispone `aih`, `ocx` e `pxpipe`: **non viene avviato alcun servizio AI** durante il restore. Nel codice ai-helper corrente, `aih start` senza argomenti avvia **ocx, Hindsight (container Docker, immagine scaricata al primo avvio) e il proxy integrato con preset pxpipe**; il proxy ascolta su `127.0.0.1:10102` e inoltra a OpenCodex su `127.0.0.1:10100`. Il pacchetto standalone `pxpipe-proxy` richiesto e' installato anche per `aih start pxpipe` (porta 47821), ma non va confuso con il proxy integrato. Non servono due processi pxpipe per il semplice `aih start`.
 
-Restano manuali il ripristino di chiavi, login/provider OpenCodex, configurazioni e dati agentmemory, plugin e l'eventuale **Headroom**, non usato dall'avvio base. [OpenCodex](https://github.com/lidge-jun/opencodex) include il runtime Bun nella propria installazione npm; non serve un Bun globale separato per `ocx`. Runtime PHP/JDK e toolchain mobile non vengono aggiunti senza requisiti/versioni dei relativi progetti; PhpStorm non equivale a un runtime PHP locale.
+Restano manuali il ripristino di chiavi, login/provider OpenCodex, configurazioni Hindsight (`aih status --ui` → `c`, chiave in `~/.aih/hindsight.env`) e i dati nel volume Docker `hindsight-data`, plugin e l'eventuale **Headroom**, non usato dall'avvio base. [OpenCodex](https://github.com/lidge-jun/opencodex) include il runtime Bun nella propria installazione npm; non serve un Bun globale separato per `ocx`. Runtime PHP/JDK e toolchain mobile non vengono aggiunti senza requisiti/versioni dei relativi progetti; PhpStorm non equivale a un runtime PHP locale.
 
 ## Fasi e opzioni
 
 Gli esempi seguenti presuppongono che la policy della sessione consenta gli script; altrimenti usa il prefisso `powershell.exe ... -File` dell'avvio rapido (una fase per invocazione).
 
 ```powershell
-# Solo app, poi Node + aih/OpenCodex/pxpipe/agentmemory; utile anche per aggiornare il vecchio restore.
+# Solo app, poi Node + aih/OpenCodex/pxpipe; utile anche per aggiornare il vecchio restore.
 .\Restore-Workstation.ps1 -Apply -AcceptAgreements -Phase Apps
 .\Restore-Workstation.ps1 -Apply -AcceptAgreements -Phase Node
 .\Restore-Workstation.ps1 -Apply -AcceptAgreements -Phase System
@@ -124,8 +124,8 @@ Dopo il riavvio, apri un **nuovo terminale non amministrativo**, completa i logi
 git --version
 nvm list
 node --version
-npm list -g @drakonkat/ai-helper @bitkyc08/opencodex pxpipe-proxy @agentmemory/agentmemory --depth=0
-Get-Command aih,ocx,pxpipe,agentmemory
+npm list -g @drakonkat/ai-helper @bitkyc08/opencodex pxpipe-proxy --depth=0
+Get-Command aih,ocx,pxpipe,docker
 aih status
 p4 -V
 wsl --version

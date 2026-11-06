@@ -7,7 +7,7 @@ import { stripAnsi } from "../src/utils/format.js";
 const repositoryUrls = {
   pxpipe: "https://github.com/teamchong/pxpipe",
   ocx: "https://github.com/lidge-jun/opencodex",
-  agentmemory: "https://github.com/rohitg00/agentmemory",
+  hindsight: "https://github.com/vectorize-io/hindsight",
   headroom: "https://github.com/headroomlabs-ai/headroom",
   proxy: "https://github.com/drakonkat/ai-helper",
 };
@@ -24,7 +24,7 @@ describe("service repositories", () => {
     expect(APP_REPOSITORY_URL).toBe(repositoryUrls.proxy);
   });
 
-  it("renders the repository column and selected full link without breaking terminal widths", () => {
+  it("renders the repository column without extra rows or breaking terminal widths", () => {
     const { columns, rows } = process.stdout;
     const dashboard = new Dashboard({ getVersions: async () => ({}) });
     dashboard.statuses = services;
@@ -36,20 +36,15 @@ describe("service repositories", () => {
         expect(lines.every(line => line.length <= width)).toBe(true);
         expect(lines.join("\n")).toContain("g GitHub");
         expect(lines.join("\n")).toContain("o dashboard");
-        if (width >= 80) {
-          expect(lines[2]).toContain("REPO");
-          expect(lines.join("\n")).toContain(repositoryUrls.pxpipe);
-        }
+        expect(lines.join("\n")).not.toContain("GitHub (g):");
         if (width === 180) {
+          expect(lines[2]).toContain("REPO");
           for (const url of Object.values(repositoryUrls)) {
             expect(lines.join("\n")).toContain(url.replace("https://github.com/", ""));
           }
           expect(lines[2]).toContain("URL");
         }
       }
-      process.stdout.columns = 100;
-      dashboard.selected = services.findIndex(service => service.id === "proxy");
-      expect(dashboard.buildLines().map(stripAnsi).join("\n")).toContain(repositoryUrls.proxy);
     } finally {
       process.stdout.columns = columns;
       process.stdout.rows = rows;
@@ -69,7 +64,7 @@ describe("service repositories", () => {
       expect(dashboard.runAction).toHaveBeenCalledTimes(1);
       const result = await action(dashboard.currentService());
       expect(manager.openRepository).toHaveBeenCalledWith(["ocx"]);
-      expect(result).toEqual({ success: true, message: `Aperto ${repositoryUrls.ocx}` });
+      expect(result).toEqual({ success: true, message: `Opened ${repositoryUrls.ocx}` });
     } finally {
       if (original === undefined) delete manager.openRepository;
       else manager.openRepository = original;
@@ -89,11 +84,11 @@ describe("service repositories", () => {
     const dashboard = new Dashboard();
     dashboard.statuses = services;
     dashboard.refresh = mock(async () => {});
-    await dashboard.runAction("Avvio", async () => ({
+    await dashboard.runAction("Start", async () => ({
       success: true, message: "ocx started", codexConfig: { status: "warning", message: "Config not updated" },
     }));
     expect(stripAnsi(dashboard.status)).toBe("ocx started | Config not updated");
-    await dashboard.runAction("Avvio", async () => ({
+    await dashboard.runAction("Start", async () => ({
       success: true, message: "ocx started", codexConfig: { status: "unchanged" },
     }));
     expect(stripAnsi(dashboard.status)).toBe("ocx started");

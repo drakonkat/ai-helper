@@ -10,6 +10,8 @@ import { normalizePresetOptions, createPresetHooks } from "./proxy-presets.js";
 
 const HOP_HEADERS = ["connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade"];
 const HOOKS = ["onRequest", "onResponse", "onResponseBody", "onResponseChunk", "onWebSocketMessage"];
+/** Reserved path answered by the proxy itself (aih status --ui health); never forwarded. */
+export const PROXY_HEALTH_PATH = "/__aih/health";
 
 function parseUrl(value) {
   return new URL(String(value).replace(/^(https?):\/*/i, "$1://"));
@@ -176,6 +178,14 @@ export async function startProxy(options) {
   }
 
   const server = http.createServer(async (request, response) => {
+    // aih's own readiness probe; never forwarded, recorded or passed to hooks.
+    if (request.url === PROXY_HEALTH_PATH && (request.method === "GET" || request.method === "HEAD")) {
+      const body = JSON.stringify({ service: "aih-proxy", status: "ok", pid: process.pid,
+        uptime_seconds: Math.round(process.uptime() * 10) / 10, upstream: target.origin, preset: config.preset });
+      response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      response.end(request.method === "HEAD" ? undefined : body);
+      return;
+    }
     const started = performance.now();
     let upstream;
     let context;

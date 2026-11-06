@@ -12,7 +12,7 @@ const INITIAL_TAIL_BYTES = 64 * 1024;
  * Headroom keeps a rolling breakdown of where the token savings came from in
  * subscription_state.json. This is the only place in the ecosystem that splits
  * the total into compression vs provider cache reads: the per-request event log
- * only ever reports source "proxy", and neither pxpipe nor agentmemory publish
+ * only ever reports source "proxy", and neither pxpipe nor hindsight publish
  * savings counters of their own.
  * @returns {string}
  */
@@ -269,7 +269,7 @@ export async function probeChain(statuses, { nativeOnly = false } = {}) {
   if (proxy || nativeOnly) {
     const options = proxy?.proxyOptions || {};
     const preset = typeof options.preset === "string" ? options.preset : "none";
-    const labels = { pxpipe: "pxpipe (libreria)", rtk: "rtk (pipe)", headroom: "headroom (compress)" };
+    const labels = { pxpipe: "pxpipe (library)", rtk: "rtk (pipe)", headroom: "headroom (compress)" };
     const stages = preset.split("-").filter(id => Object.hasOwn(labels, id)).map(id => ({
       id, label: labels[id],
       state: id === "pxpipe" ? proxy?.status || "unknown" : "static",
@@ -311,7 +311,7 @@ export async function probeChain(statuses, { nativeOnly = false } = {}) {
       if (baseUrl(upstream.url) && baseUrl(upstream.url) === baseUrl(byId.pxpipe?.url)) {
         if (nodes[2].state === "running") nodes[2].state = checkedState(upstream.status, nodes[2].state);
       } else {
-        nodes[1].detail += ` | inoltro: ${upstream.url} (destinazione non verificata)`;
+        nodes[1].detail += ` | forwards to: ${upstream.url} (destination not verified)`;
       }
     }
   }

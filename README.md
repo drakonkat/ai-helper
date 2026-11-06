@@ -39,7 +39,7 @@
 When building, testing, and collaborating with local AI agents, coding assistants, and MCP servers, multiple background services must run simultaneously:
 1. **`pxpipe`**: LLM & MCP protocol reverse proxy bridge (`npx pxpipe-proxy`).
 2. **`ocx`**: OpenCode interpreter and execution daemon (`ocx start`).
-3. **`agentmemory`**: Persistent long-term agent memory server (`npx @agentmemory/agentmemory`).
+3. **`hindsight`**: Long-term agent memory ([vectorize-io/hindsight](https://github.com/vectorize-io/hindsight)), run as a Docker container.
 4. **`headroom`**: LLM context optimization & compression proxy (`headroom proxy`).
 
 Manually opening separate terminal tabs for each service is messy, clutters your workspace, and easily leads to orphaned background processes and blocked ports.
@@ -64,7 +64,7 @@ npx @drakonkat/ai-helper status
 # Open service web dashboards in your default browser
 npx @drakonkat/ai-helper open
 
-# Start ocx, agentmemory and the pxpipe proxy
+# Start ocx, hindsight (Docker) and the pxpipe proxy
 npx @drakonkat/ai-helper start
 ```
 
@@ -92,9 +92,51 @@ bun add -g @drakonkat/ai-helper
 | :--- | :--- | :--- | :--- | :--- |
 | **`pxpipe`** | `npx pxpipe-proxy` | [`http://localhost:47821`](http://localhost:47821) | [teamchong/pxpipe](https://github.com/teamchong/pxpipe) | AI LLM & MCP protocol reverse proxy bridge |
 | **`ocx`** | `ocx start` | [`http://localhost:10100`](http://localhost:10100) | [lidge-jun/opencodex](https://github.com/lidge-jun/opencodex) | OpenCode interpreter execution daemon |
-| **`agentmemory`** | `npx @agentmemory/agentmemory` | [`http://localhost:3113`](http://localhost:3113) | [rohitg00/agentmemory](https://github.com/rohitg00/agentmemory) | Persistent agent long-term memory server & viewer |
+| **`hindsight`** | Docker container `hindsight` (`ghcr.io/vectorize-io/hindsight`) | [`http://localhost:9999`](http://localhost:9999) (UI), API `http://127.0.0.1:8888` | [vectorize-io/hindsight](https://github.com/vectorize-io/hindsight) | Long-term agent memory; requires Docker; health from `/health` |
 | **`headroom`** | `headroom proxy` | [`http://localhost:8787/dashboard`](http://localhost:8787/dashboard) | [headroomlabs-ai/headroom](https://github.com/headroomlabs-ai/headroom) | Context optimization & LLM compression proxy |
 | **`proxy`** | `aih start proxy <upstream>` | `http://127.0.0.1:10101` | [drakonkat/ai-helper](https://github.com/drakonkat/ai-helper) | HTTP/SSE/WebSocket forwarding with optional presets; **no web dashboard** |
+
+### Hindsight (Docker)
+
+[Hindsight](https://github.com/vectorize-io/hindsight) replaces agentmemory as the
+memory service. It runs in Docker, so **Docker Desktop (Windows/macOS) or Docker
+Engine (Linux) must be installed and running**. aih tracks it by container state,
+not by PID, and never kills processes on its ports (on Windows they belong to Docker).
+
+- **start** checks Docker, then starts the container named `hindsight` or, when it
+  does not exist, pulls the image if needed and creates it with
+  `docker run -d --restart unless-stopped --shm-size 1g`, loopback ports
+  `127.0.0.1:8888` (API) and `127.0.0.1:9999` (UI) and the volume
+  `hindsight-data:/home/hindsight/.pg0`. Start succeeds only when `GET /health`
+  answers HTTP 200 (up to 3 minutes; the first boot initializes the database).
+- **stop** runs `docker stop`; data stays in the volume. **logs** shows `docker logs`;
+  the docker commands run by aih are recorded in `~/.aih/logs/hindsight.log`.
+- **An existing container with the same name is reused as is**, for example one created
+  by docker compose. aih starts/stops it but never recreates or updates it.
+- Containers created by aih carry the labels `io.aih.managed=true` and a settings
+  fingerprint: after a settings change they are recreated on the next start (or by
+  *Save and apply now* if running), always keeping the data volume.
+- **update** (`aih update hindsight` or `u`) pulls the configured image and recreates
+  an aih-managed container only if the image changed; a running one is restarted and
+  checked again through `/health`.
+
+Settings are edited in `aih status --ui` → **`c`** after selecting **hindsight** in the
+Startup step: container name, image (default `ghcr.io/vectorize-io/hindsight:latest`),
+API/UI ports, data volume, LLM provider (`HINDSIGHT_API_LLM_PROVIDER`, default `openai`),
+model, OpenAI-compatible base URL (from the container use `host.docker.internal`, e.g.
+`http://host.docker.internal:10100/v1` for OCX), API key and an optional extra
+`--env-file` for advanced `HINDSIGHT_*` variables. Non-secret values are saved in
+`state.config.hindsight`; the key is saved only in `~/.aih/hindsight.env` and passed with
+`--env-file`, never on the command line. Without a saved key, `HINDSIGHT_API_LLM_API_KEY`
+from aih's environment is forwarded. **Check** in the summary verifies Docker, key,
+image, ports, container ownership and current health without changing anything.
+
+Hindsight's health is its `/health` readiness (including the database); `VERSION`
+comes from `/health/live`. See [Live health checks](#live-health-checks) for the dashboard columns.
+
+Upgrading from agentmemory: saved Startup selections and `state.json` entries are
+migrated automatically; aih no longer manages or stops a still-running agentmemory,
+so stop it manually (`npx @agentmemory/agentmemory stop`) if needed.
 
 ---
 
@@ -102,7 +144,7 @@ bun add -g @drakonkat/ai-helper
 
 - 🔍 **Real-Time Auto-Discovery**: Automatically queries OS process tables (`Win32_Process` and TCP listening connections on Windows, `ps` on Unix) to discover and manage processes started from external terminal windows.
 - 🌐 **One-Click Dashboard Launcher**: Run `aih open` to launch service dashboards in your browser in separate tabs.
-- 🛡️ **Clean Process Tree Termination**: Kills parent and all nested child worker processes (`node.exe`, `iii.exe`, etc.) ensuring no ports remain locked.
+- 🛡️ **Clean Process Tree Termination**: Kills parent and all nested child worker processes (`node.exe`, `python.exe`, etc.) ensuring no ports remain locked.
 - 📜 **Live Log Streaming**: Unified stdout/stderr log capture per service with live real-time tailing (`aih logs <service> -f`).
 - 🤖 **Agent & Automation Friendly**: Native `--json` output format for IDE integrations, subagents, and automated workflows.
 - 🔀 **Compression Presets**: pxpipe as a library, Headroom compression, RTK stdin filtering, or ordered combinations.
@@ -121,12 +163,12 @@ spaces, such as `--interceptor "./my hooks/interceptor.mjs"`.
 | `status [services...] [--json] [--ui]` | `aih status ocx proxy --json`; `aih status --ui` |
 | `start [services...] [--models <list>] [--json]` | `aih start --models "gpt-6-astra,anthropic/claude-fable*"` |
 | `start proxy [upstream] [proxy options] [--json]` | `aih start proxy http://127.0.0.1:10100/ --listen http://127.0.0.1:10102 --preset pxpipe` |
-| `stop [services...]` | `aih stop ocx agentmemory` |
-| `restart [services...] [--json]` | `aih restart ocx agentmemory --json` |
+| `stop [services...]` | `aih stop ocx hindsight` |
+| `restart [services...] [--json]` | `aih restart ocx hindsight --json` |
 | `restart proxy [upstream] [proxy options] [--json]` | `aih restart proxy --models="gpt-6-astra,anthropic/claude-fable*"` |
 | `update [--json]` | `aih update` (update aih itself from npm) |
-| `update <services...> [--json]` | `aih update ocx agentmemory --json`; `aih ocx update` |
-| `open [services...] [--repo]` | `aih open agentmemory`; `aih open proxy --repo` |
+| `update <services...> [--json]` | `aih update ocx hindsight --json`; `aih ocx update` |
+| `open [services...] [--repo]` | `aih open hindsight`; `aih open proxy --repo` |
 | `logs <service> [-n <lines>] [-f]` | `aih logs proxy --lines=100 --follow` |
 | `stats proxy [--json]` | `aih stats proxy --json` |
 | `install` | `aih install` (build/install the standalone binary; requires Bun) |
@@ -155,21 +197,21 @@ SERVICE       STATUS        PID   UPTIME   ADDRESS                  REPO        
 ───────────   ─────────   ─────   ──────   ──────────────────────   ─────────────────────────────────────────  ────────────────────────────
 pxpipe        ● RUNNING   36212   1h 42m   http://localhost:47821   https://github.com/teamchong/pxpipe         npx pxpipe-proxy
 ocx           ● RUNNING   31540      54s   http://localhost:10100   https://github.com/lidge-jun/opencodex      ocx start
-agentmemory   ● RUNNING   44600   1h 32m   http://localhost:3113    https://github.com/rohitg00/agentmemory     npx @agentmemory/agentmemory
+hindsight     ● RUNNING       -   1h 32m   http://localhost:9999    https://github.com/vectorize-io/hindsight   docker container hindsight (ghcr.io/vectorize-io/hindsight:latest)
 
 Use 'aih open [service]' to open dashboards in browser or 'aih start' to launch.
 ```
 
 Run `aih status --ui` in a terminal for the interactive live dashboard. Its
-`REPO` column shows the GitHub owner/repository; the selected service's full
-repository and dashboard URLs appear below the table. Press **`g`** to open its
-repository. Plain `status` prints full repository links, and `status --json`
+`REPO` column shows the GitHub owner/repository and `URL` the dashboard address.
+Press **`g`** to open the selected service's repository and **`o`** its dashboard.
+Plain `status` prints full repository links, and `status --json`
 includes `repositoryUrl` (null for custom services without metadata). The built-in
 proxy links to ai-helper's repository, not its forwarding address.
 
 #### Guided proxy setup
 
-Press **`c` — setup proxy** from anywhere in `aih status --ui`, even before the
+Press **`c` — setup** from anywhere in `aih status --ui`, even before the
 proxy's first start. The wizard edits a local draft: upstream/listener, supported
 ordered recipes, model list, Headroom URL, RTK filter, pxpipe native-image handling,
 interceptor `.mjs` and maximum body size. Tool-specific fields appear only when
@@ -183,14 +225,17 @@ that tool is enabled. pxpipe is bundled as a library; its separate daemon is not
   A stopped proxy is marked explicitly; an unconfigured proxy shows **not configured**.
   Pending saved settings can differ from the current worker. The editable line is the new draft.
 - The **Startup** step selects which services launch together with plain `aih start`
-  or `aih up`: OCX, AgentMemory, standalone pxpipe, Headroom and the built-in proxy.
+  or `aih up`: OCX, Hindsight, standalone pxpipe, Headroom and the built-in proxy.
   Use **Up/Down** to move, **Space** to toggle and **Enter** to continue. Select at
   least one service. Choices are saved with setup in `state.config.startServices`.
   Upstream services launch first, followed by the built-in proxy. Until configured,
-  the defaults remain OCX, AgentMemory and proxy. Explicit targets such as
+  the defaults remain OCX, Hindsight and proxy. Explicit targets such as
   `aih start ocx` override the selection; `aih start --gpt` keeps its dedicated workflow.
   Saving/applying setup does not launch the selected services immediately: the
-  selection takes effect on the next plain start/up. Apply now only starts/restarts the proxy.
+  selection takes effect on the next plain start/up. Apply now only starts/restarts the proxy
+  (and recreates a running aih-managed Hindsight container whose settings changed).
+- When **hindsight** is selected in Startup, the wizard continues with its Docker
+  settings; see [Hindsight (Docker)](#hindsight-docker). Otherwise they are skipped and left unchanged.
 - **Esc** cancels; a modified draft asks for confirmation before discarding it.
 - The final summary marks differences from the running configuration. Use arrows
   and Enter to choose an action, and **PgUp/PgDn** to scroll details.
@@ -217,8 +262,8 @@ Empty optional values persist as resets, not as omitted overrides.
 The dashboard's
 `VERSION` column shows the running service version when available, otherwise the
 installed version. `UPDATE` shows `↑ <version>` for an available update,
-`aggiornato` when no newer version is found, or `n/d` when the check cannot be
-completed. Checks query npm/PyPI in the background every five minutes and after
+`up to date` when no newer version is found, or `n/a` when the check cannot be
+completed. Checks query npm/PyPI (GitHub releases for Hindsight) in the background every five minutes and after
 a service restart; they never install or update services.
 
 Press **`u`** to update the selected service to the latest available release.
@@ -227,14 +272,36 @@ and refreshes version information even for stopped services. Repeated action
 keys are ignored while an operation is in progress. Only services that were
 running are stopped and restarted; stopped services stay stopped.
 
-Both `PIPELINE` and `STREAM RICHIESTE` read the native AIH proxy snapshot,
+#### Live health checks
+
+The **`HEALTH`** column shows the last health reading of each running service and
+**`LAST CHECK`** its age (`3s ago`, yellow after 15 seconds). Readings are taken every
+5 seconds, in the background, and immediately after a start/stop/restart or PID change;
+stopped services are not probed.
+
+| Service | Endpoint | Healthy when |
+| --- | --- | --- |
+| `ocx` | `GET /healthz` | `service: "opencodex"` and `status: "ok"` |
+| `headroom` | `GET /health` | a Headroom answer with `status: "healthy"` |
+| `proxy` | `GET /__aih/health` (answered by the proxy itself, never forwarded or recorded) | `service: "aih-proxy"`, `status: "ok"` |
+| `hindsight` | `GET /health` on the API port | HTTP 200 and `status: "healthy"` (database connected) |
+| `pxpipe` | `GET /proxy-stats` | the standalone pxpipe answers with JSON (it has no health route) |
+
+Values: `ok`, `degraded` (the service answers but reports a problem or an HTTP error),
+`unreachable` (no answer or timeout), `unverified` (something answers on the port but it
+is not the expected service), `stopped`, `no docker` (Docker unavailable) and `-` for
+services without a health check. A proxy started by an older aih forwards
+`/__aih/health` upstream and shows `unverified` until it is restarted. When the proxy is
+verified, the pipeline shows `aih proxy: verified` instead of `process running`.
+
+Both `PIPELINE` and `REQUEST STREAM` read the native AIH proxy snapshot,
 `~/.aih/proxy-stats.json` (`AIH_HOME` overrides the directory), not Headroom's
 metrics or savings event log. `PIPELINE` shows recorded requests, changed requests,
 preset errors, estimated token savings and each stage's application/measurement
-counts. `elab/s` measures preset processing between successful samples, not all
+counts. `proc/s` measures preset processing between successful samples, not all
 proxy traffic or token-generation speed. Counters persist across restarts.
 
-`STREAM RICHIESTE` shows the latest recorded events with local time, model,
+`REQUEST STREAM` shows the latest recorded events with local time, model,
 HTTP/WS transport, preset, changed/unchanged/error outcome, estimated savings
 and stage reasons. When Codex supplies `x-codex-turn-metadata`, events also show
 the session ID (falling back to the thread ID) and Git project (`owner/repo` from
@@ -262,7 +329,7 @@ only means no completion was recorded (for example after a proxy crash), not a
 global count of active calls. Updates do not bring evicted events back into the
 bounded recent list. WebSocket events report **only preset time**: connection
 duration and arbitrary response frames cannot safely be attributed to individual
-calls. Missing/older timings remain `n/d`. Error responses that arrive normally
+calls. Missing/older timings remain `n/a`. Error responses that arrive normally
 (such as HTTP 500) retain their status; a transport failure is marked separately
 from a preset error. Preset `none` remains unrecorded.
 
@@ -304,8 +371,8 @@ built-in proxy with `aih restart proxy` to load the updated code.
 ```bash
 aih ocx update                     # update OpenCodex to the latest available release
 aih update ocx                     # equivalent command-first form
-aih update ocx agentmemory         # update selected services
-aih update pxpipe ocx agentmemory headroom  # all managed services, not aih itself
+aih update ocx hindsight           # update selected services
+aih update pxpipe ocx hindsight headroom    # all managed services, not aih itself
 aih update ocx --json              # JSON result array, exit code 1 on any failure
 ```
 
@@ -320,7 +387,7 @@ instead. The proxy's bundled pxpipe library is likewise updated with ai-helper,
 not by updating the separate `pxpipe` service.
 
 The Node services use `npm install --global <package>@latest` (`pxpipe-proxy`,
-`@bitkyc08/opencodex`, `@agentmemory/agentmemory`), so npm must be available and
+`@bitkyc08/opencodex`), so npm must be available and
 its global installation directory writable and on PATH. Headroom is updated with its own
 `headroom update --yes` command to respect the existing Python installation.
 **If Headroom is not installed, the same command installs it** on the machine running aih:
@@ -342,7 +409,7 @@ the verified package version so an older project dependency/cache cannot win.
 aih open
 
 # Open only a specific dashboard
-aih open agentmemory      # Opens http://localhost:3113
+aih open hindsight        # Opens http://localhost:9999 (Hindsight UI)
 aih open ocx              # Opens http://localhost:10100
 aih open pxpipe           # Opens http://localhost:47821
 
@@ -356,15 +423,15 @@ aih open proxy --repo
 ### 3. Start Services
 
 ```bash
-# Start ocx, agentmemory and the pxpipe proxy
+# Start ocx, hindsight (Docker) and the pxpipe proxy
 aih start
 
 # Start a specific service
 aih start pxpipe
-aih start agentmemory
+aih start hindsight
 ```
 
-Without service targets, `aih start` (or `aih up`) starts `ocx`, `agentmemory`,
+Without service targets, `aih start` (or `aih up`) starts `ocx`, `hindsight`,
 then the built-in proxy with these options:
 
 ```bash
@@ -421,12 +488,12 @@ exists, successful starts retain their effective options in that setup instead.
 `aih config pxpipe-models=`
 saves pxpipe's default selection. Configuration does not restart a running proxy.
 
-The value is passed only to the built-in proxy; `ocx` and `agentmemory` start
+The value is passed only to the built-in proxy; `ocx` and `hindsight` start
 normally. `--models=` passes an empty string; `--models ""` also works when your
 shell preserves empty arguments. A bare `--models` without a value is an error.
 See [Select models](#select-models) for matching and compression behavior.
 
-Without a saved Startup selection, no-target `start`/`up` launches OCX, AgentMemory
+Without a saved Startup selection, no-target `start`/`up` launches OCX, Hindsight
 and proxy. Unless a dashboard setup has been saved, these commands supply the upstream, listener and preset above
 on every invocation, plus the configured model list (or the list above if unset),
 unless `--models` overrides it.
@@ -510,7 +577,7 @@ aih restart pxpipe
 aih logs pxpipe
 
 # View last 100 lines
-aih logs agentmemory -n 100
+aih logs hindsight -n 100      # docker logs of the Hindsight container
 
 # Stream logs in real-time (like tail -f)
 aih logs ocx -f
@@ -922,15 +989,18 @@ aih status --json
     "logSize": 12480
   },
   {
-    "id": "agentmemory",
-    "name": "agentmemory",
-    "command": "npx @agentmemory/agentmemory",
+    "id": "hindsight",
+    "name": "hindsight",
+    "runtime": "docker",
     "status": "running",
-    "pid": 44600,
+    "command": "docker container hindsight (ghcr.io/vectorize-io/hindsight:latest)",
     "uptime": "1h 32m",
-    "url": "http://localhost:3113",
-    "description": "Long-term persistent agent memory service (@agentmemory/agentmemory)",
-    "logPath": "C:\\Users\\user\\.aih\\logs\\agentmemory.log",
+    "url": "http://localhost:9999",
+    "apiUrl": "http://127.0.0.1:8888",
+    "containerName": "hindsight",
+    "containerId": "0dac31334616",
+    "description": "Long-term agent memory in Docker (vectorize-io/hindsight; API :8888, UI :9999)",
+    "logPath": "C:\\Users\\user\\.aih\\logs\\hindsight.log",
     "logSize": 85190
   }
 ]
@@ -941,7 +1011,8 @@ aih status --json
 ## 📁 Configuration & State
 
 State and log files are stored in the user's home directory under `~/.aih`:
-- **State File**: `~/.aih/state.json` (records active PIDs, start timestamps, URLs, and status).
+- **State File**: `~/.aih/state.json` (records active PIDs, start timestamps, URLs, status and the non-secret Hindsight settings).
+- **Hindsight API key**: `~/.aih/hindsight.env` (`HINDSIGHT_API_LLM_API_KEY=...`, passed to Docker with `--env-file`).
 - **Proxy Statistics**: `~/.aih/proxy-stats.json` (cumulative estimates and the last 20 measurements).
 - **Log Directory**: `~/.aih/logs/<service>.log` (stdout and stderr captured with startup banners).
 

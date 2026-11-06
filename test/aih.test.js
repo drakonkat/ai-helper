@@ -123,7 +123,7 @@ describe("Service start CLI", () => {
           for (const override of [undefined, "custom/*", ""]) {
             calls.length = 0;
             await run(command, "--json", ...(override === undefined ? [] : [`--models=${override}`]));
-            expect(calls.map(([id]) => id)).toEqual(["ocx", "agentmemory", "proxy"]);
+            expect(calls.map(([id]) => id)).toEqual(["ocx", "hindsight", "proxy"]);
             expect(calls[2][1].models).toBe(override ?? saved);
             expect(manager.readState().config.pxpipeModels).toBe(saved);
           }
@@ -166,11 +166,11 @@ describe("Service start CLI", () => {
       const { main } = await import("../src/index.js");
       for (const command of ["start", "up"]) {
         for (const [args, expected] of [
-          [[], [["ocx", undefined], ["agentmemory", undefined], ["proxy", defaultProxy]]],
-          [["--models", "custom/*"], [["ocx", undefined], ["agentmemory", undefined], ["proxy", { ...defaultProxy, models: "custom/*" }]]],
-          [["--models=custom/*"], [["ocx", undefined], ["agentmemory", undefined], ["proxy", { ...defaultProxy, models: "custom/*" }]]],
-          [["--models", ""], [["ocx", undefined], ["agentmemory", undefined], ["proxy", { ...defaultProxy, models: "" }]]],
-          [["--models="], [["ocx", undefined], ["agentmemory", undefined], ["proxy", { ...defaultProxy, models: "" }]]],
+          [[], [["ocx", undefined], ["hindsight", undefined], ["proxy", defaultProxy]]],
+          [["--models", "custom/*"], [["ocx", undefined], ["hindsight", undefined], ["proxy", { ...defaultProxy, models: "custom/*" }]]],
+          [["--models=custom/*"], [["ocx", undefined], ["hindsight", undefined], ["proxy", { ...defaultProxy, models: "custom/*" }]]],
+          [["--models", ""], [["ocx", undefined], ["hindsight", undefined], ["proxy", { ...defaultProxy, models: "" }]]],
+          [["--models="], [["ocx", undefined], ["hindsight", undefined], ["proxy", { ...defaultProxy, models: "" }]]],
           [["ocx", "proxy", "--models", "custom/*"], [["ocx", undefined], ["proxy", { models: "custom/*" }]]],
           [["pxpipe", "headroom"], [["pxpipe", undefined], ["headroom", undefined]]],
           [["proxy", customProxy.upstream, "--listen", customProxy.listen, "--preset", customProxy.preset, "--models", customProxy.models], [["proxy", customProxy]]],
@@ -225,7 +225,8 @@ describe("Dashboard setup CLI interoperability", () => {
         for (const [selected, expected] of [
           [["proxy", "headroom", "ocx"], ["ocx", "headroom", "proxy"]],
           [["ocx"], ["ocx"]],
-          [["agentmemory", "pxpipe"], ["agentmemory", "pxpipe"]],
+          [["hindsight", "pxpipe"], ["hindsight", "pxpipe"]],
+          [["agentmemory", "pxpipe"], ["hindsight", "pxpipe"]], // saved before agentmemory was replaced
         ]) {
           manager.saveState({ ...previous, config: { proxyOptions: saved, startServices: selected } });
           calls.length = 0;
@@ -346,15 +347,15 @@ describe("Self and managed service update CLI", () => {
     expect(all.calls).toEqual(SERVICE_IDS);
     expect(all.selfCalls).toBe(0);
     expect(all.calls).not.toContain("proxy");
-    const selected = await runUpdate(["update", "ocx", "agentmemory", "ocx", "--json"]);
-    expect(selected.calls).toEqual(["ocx", "agentmemory"]);
+    const selected = await runUpdate(["update", "ocx", "hindsight", "ocx", "--json"]);
+    expect(selected.calls).toEqual(["ocx", "hindsight"]);
     expect(JSON.parse(selected.stdout[0]).map(r => r.id)).toEqual(selected.calls);
   });
 
   it("validates every target and all update options before any mutation", async () => {
     for (const args of [
       ["update", "ocx", "unknown"], ["update", "proxy"],
-      ["ocx", "update", "agentmemory"], ["unknown", "update"],
+      ["ocx", "update", "hindsight"], ["unknown", "update"],
       ["update", "--ocx"], ["update", "ocx", "--repo"],
       ["update", "--repo"], ["update", "--models=ignored"],
     ]) {
@@ -393,10 +394,10 @@ describe("Configuration", () => {
     expect(CLI_NAME).toBe("aih");
   });
 
-  it("should define the core services: pxpipe, ocx, agentmemory, headroom", () => {
+  it("should define the core services: pxpipe, ocx, hindsight, headroom", () => {
     expect(SERVICE_IDS).toContain("pxpipe");
     expect(SERVICE_IDS).toContain("ocx");
-    expect(SERVICE_IDS).toContain("agentmemory");
+    expect(SERVICE_IDS).toContain("hindsight");
     expect(SERVICE_IDS).toContain("headroom");
     expect(SERVICE_IDS.length).toBe(4);
   });
@@ -406,8 +407,8 @@ describe("Configuration", () => {
     expect(SERVICES.pxpipe.defaultUrl).toBe("http://localhost:47821");
     expect(SERVICES.ocx.command).toBe("ocx start");
     expect(SERVICES.ocx.defaultUrl).toBe("http://localhost:10100");
-    expect(SERVICES.agentmemory.command).toBe("npx @agentmemory/agentmemory");
-    expect(SERVICES.agentmemory.defaultUrl).toBe("http://localhost:3113");
+    expect(SERVICES.hindsight.runtime).toBe("docker");
+    expect(SERVICES.hindsight.defaultUrl).toBe("http://localhost:9999");
     expect(SERVICES.headroom.command).toBe("headroom proxy");
     expect(SERVICES.headroom.defaultUrl).toBe("http://localhost:8787/dashboard");
   });
@@ -510,7 +511,7 @@ describe("Service Manager", () => {
     expect(state.services).toBeDefined();
     expect(state.services.pxpipe).toBeDefined();
     expect(state.services.ocx).toBeDefined();
-    expect(state.services.agentmemory).toBeDefined();
+    expect(state.services.hindsight).toBeDefined();
     expect(state.services.headroom).toBeDefined();
   });
 
@@ -520,7 +521,7 @@ describe("Service Manager", () => {
     const ids = statuses.map(s => s.id);
     expect(ids).toContain("pxpipe");
     expect(ids).toContain("ocx");
-    expect(ids).toContain("agentmemory");
+    expect(ids).toContain("hindsight");
     expect(ids).toContain("headroom");
 
     for (const svc of statuses) {

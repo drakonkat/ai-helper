@@ -12,7 +12,6 @@ import {
 } from "../src/utils/metrics.js";
 import { Dashboard, splitKeys } from "../src/tui.js";
 import { stripAnsi } from "../src/utils/format.js";
-import { resolveAgentmemoryViewerPort } from "../src/utils/process.js";
 
 const SAMPLE = [
   "# HELP headroom_requests_total Total number of requests",
@@ -190,7 +189,7 @@ describe("probeChain", () => {
     expect(nodes.map(n => n.id)).toEqual(["client", "proxy", "rtk", "headroom", "pxpipe", "upstream"]);
     expect(nodes[2].label).toBe("rtk (pipe)");
     expect(nodes[3].detail).toBe("http://127.0.0.1:8787");
-    expect(nodes[4].label).toBe("pxpipe (libreria)");
+    expect(nodes[4].label).toBe("pxpipe (library)");
     expect(nodes[4].state).toBe("running");
     expect(nodes[5].state).toBe("unknown");
     expect(nodes[5].detail).toBe("http://127.0.0.1:10100/v1");
@@ -254,7 +253,7 @@ describe("probeChain", () => {
       status: "healthy",
       checks: { upstream: { url: "http://127.0.0.1:9999/v1", status } },
     });
-    expect(nodes[1].detail).toContain("inoltro: http://127.0.0.1:9999/v1 (destinazione non verificata)");
+    expect(nodes[1].detail).toContain("forwards to: http://127.0.0.1:9999/v1 (destination not verified)");
     expect(nodes[2].state).toBe("running");
     expect(nodes[2].detail).toBe("http://127.0.0.1:47821");
   });
@@ -306,19 +305,19 @@ describe("proxy visibility", () => {
     const screen = dashboard.buildLines().join("\n");
     expect(screen).toContain("VERSION");
     expect(screen).toContain("UPDATE");
-    expect(screen).toContain("risparmio stimato 120");
+    expect(screen).toContain("estimated savings 120");
     expect(screen).toContain("rtk: 20");
     expect(screen).toContain("pxpipe: 100");
     expect(screen).not.toContain("o\x1b[0m dashboard");
     expect(screen).not.toContain("\x1b[4mhttp://127.0.0.1:10102");
     const chain = await probeChain(dashboard.statuses);
     expect(chain.nodes.map(n => n.id)).toEqual(["client", "proxy", "rtk", "pxpipe", "upstream"]);
-    expect(chain.nodes[3].label).toBe("pxpipe (libreria)");
+    expect(chain.nodes[3].label).toBe("pxpipe (library)");
     dashboard.chain = chain.nodes;
     dashboard.chainAt = Date.now();
     const pipeline = () => dashboard.pipelineLines(100).map(stripAnsi).join("\n");
-    expect(pipeline()).toContain("aih proxy: processo attivo");
-    expect(pipeline()).toContain("pxpipe (libreria): processo attivo");
+    expect(pipeline()).toContain("aih proxy: process running");
+    expect(pipeline()).toContain("pxpipe (library): process running");
     dashboard.onKey("d");
     expect(pipeline()).toContain("aih proxy: http://127.0.0.1:10102");
     expect(pipeline()).toContain("upstream: http://127.0.0.1:10100");
@@ -371,29 +370,5 @@ describe("readSavingsBreakdown", () => {
     expect(readSavingsBreakdown(join(tmpdir(), "aih-does-not-exist.json"))).toBeNull();
     expect(readSavingsBreakdown(write("bad.json", "not json{"))).toBeNull();
     expect(readSavingsBreakdown(write("other.json", { pid: 1 }))).toBeNull();
-  });
-});
-
-describe("resolveAgentmemoryViewerPort", () => {
-  it("picks the viewer, not the engine port that is bound on every interface", () => {
-    expect(resolveAgentmemoryViewerPort([49134, 3111, 3112])).toBe(3113);
-  });
-
-  it("recovers the viewer from the engine port alone", () => {
-    expect(resolveAgentmemoryViewerPort([49134])).toBe(3113);
-    expect(resolveAgentmemoryViewerPort([50023])).toBe(4002);
-  });
-
-  it("follows a relocated instance instead of assuming the default", () => {
-    expect(resolveAgentmemoryViewerPort([4000, 4001, 50023])).toBe(4002);
-  });
-
-  it("derives the viewer from the REST anchor when the engine is not visible", () => {
-    expect(resolveAgentmemoryViewerPort([3111])).toBe(3113);
-  });
-
-  it("falls back to the default when no port is visible", () => {
-    expect(resolveAgentmemoryViewerPort([])).toBe(3113);
-    expect(resolveAgentmemoryViewerPort(undefined)).toBe(3113);
   });
 });

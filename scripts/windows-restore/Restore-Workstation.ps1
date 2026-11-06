@@ -30,8 +30,6 @@ param(
     [string]$OpenCodexVersion = 'latest',
     [ValidatePattern('^(latest|\d+\.\d+\.\d+)$')]
     [string]$PxpipeVersion = 'latest',
-    [ValidatePattern('^(latest|\d+\.\d+\.\d+)$')]
-    [string]$AgentMemoryVersion = 'latest',
     [string[]]$SkipPackage = @(), # ID WinGet, anche in modalita Chocolatey
     [switch]$SkipWhatsApp,
     [string]$WorkspacePath = (Join-Path $env:USERPROFILE 'Perforce\Neden_NiccoloWorkspace'),
@@ -260,8 +258,8 @@ function Get-AihNpmTools {
     @(
         [pscustomobject]@{ Name = 'aih'; Package = '@drakonkat/ai-helper'; Version = $AihVersion; Command = 'aih.cmd' },
         [pscustomobject]@{ Name = 'OpenCodex'; Package = '@bitkyc08/opencodex'; Version = $OpenCodexVersion; Command = 'ocx.cmd' },
-        [pscustomobject]@{ Name = 'pxpipe'; Package = 'pxpipe-proxy'; Version = $PxpipeVersion; Command = 'pxpipe.cmd' },
-        [pscustomobject]@{ Name = 'agentmemory'; Package = '@agentmemory/agentmemory'; Version = $AgentMemoryVersion; Command = 'agentmemory.cmd' }
+        [pscustomobject]@{ Name = 'pxpipe'; Package = 'pxpipe-proxy'; Version = $PxpipeVersion; Command = 'pxpipe.cmd' }
+        # Hindsight (memory) runs in Docker: aih pulls its image on the first start.
     )
 }
 

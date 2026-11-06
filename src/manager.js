@@ -9,6 +9,25 @@ import { SERVICES, SERVICE_IDS, SERVICE_PACKAGES, APP_REPOSITORY_URL } from "./c
 import { compareVersions, getServiceVersions } from "./utils/versions.js";
 import { installServiceUpdate, serviceStartCommand } from "./service-updates.js";
 import { configureCodexForProxy } from "./codex-routing.js";
+import {
+  HINDSIGHT_DEFAULTS,
+  describeHealth,
+  dockerInfo,
+  dockerLogged,
+  hindsightConfigHash,
+  hindsightRunArgs,
+  hindsightUrls,
+  imageId,
+  inspectContainer,
+  normalizeHindsightConfig,
+  probeHindsightHealth,
+  readHindsightApiKey,
+  requiresApiKey,
+  saveHindsightApiKey,
+  validateHindsightApiKey,
+  HINDSIGHT_KEY_ENV,
+  dockerError,
+} from "./hindsight.js";
 import { ensureDir, getAihDir, getLogsDir, getServiceLogPath, getStateFilePath } from "./utils/path.js";
 import {
   isPidRunning,
@@ -22,11 +41,29 @@ import {
 } from "./utils/process.js";
 import { formatBytes, formatUptime, gray, red, yellow, green, cyan } from "./utils/format.js";
 
+const isDocker = id => SERVICES[id]?.runtime === "docker";
+
 export class ServiceManager {
   updatesInProgress = new Set();
+  /** Injectable for tests: (cmd, args, timeoutMs) => { exitCode, stdout, stderr }. */
+  runDocker = execCommand;
+  probeHealth = probeHindsightHealth;
+  hindsightStartTimeoutMs = 180000;
+  hindsightPollMs = 1000;
+  dockerRetryAt = 0;
+
+  /** Saved Hindsight settings; invalid saved values fall back to defaults unless strict. */
+  hindsightConfig(state = this.readState(), { strict = false } = {}) {
+    try { return normalizeHindsightConfig(state.config?.hindsight); }
+    catch (error) {
+      if (strict) throw error;
+      return normalizeHindsightConfig(HINDSIGHT_DEFAULTS);
+    }
+  }
 
   /** Explicit update: fresh check, stop if needed, install, verify, restore runtime state. */
   async updateService(serviceId, { getVersions = getServiceVersions, install = installServiceUpdate } = {}) {
+    if (isDocker(serviceId)) return this.updateDockerService(serviceId);
     if (!Object.hasOwn(SERVICE_PACKAGES, serviceId)) {
       return { success: false, message: serviceId === "proxy"
         ? "The built-in proxy is part of ai-helper; update ai-helper itself to update it."
@@ -143,6 +180,9 @@ export class ServiceManager {
         state = { services: {}, updatedAt: new Date().toISOString() };
       }
     }
+    state.services ||= {};
+    // agentmemory was replaced by Hindsight; never manage or stop a leftover entry.
+    delete state.services.agentmemory;
 
     for (const id of SERVICE_IDS) {
       const def = SERVICES[id];
@@ -171,6 +211,10 @@ export class ServiceManager {
     const discovered = await discoverRunningProcesses({ knownServices: state.services });
 
     for (const id of Object.keys(state.services)) {
+      if (isDocker(id)) {
+        if (await this.syncDockerService(state, id)) needsSave = true;
+        continue;
+      }
       const svc = state.services[id];
       const info = discovered[id];
 
@@ -210,6 +254,37 @@ export class ServiceManager {
     return state;
   }
 
+  /** Container state replaces PID tracking; Docker's port proxies are not the service. */
+  async syncDockerService(state, id) {
+    const svc = state.services[id] || {};
+    const config = this.hindsightConfig(state);
+    const urls = hindsightUrls(config);
+    let container = null;
+    let runtimeError;
+    if (Date.now() < this.dockerRetryAt) runtimeError = svc.runtimeError || "Docker not available";
+    else {
+      try { container = await inspectContainer(config.containerName, this.runDocker); }
+      catch (error) {
+        runtimeError = error.message;
+        // A stopped Docker Desktop must not stall every one-second dashboard refresh.
+        this.dockerRetryAt = Date.now() + 10000;
+      }
+    }
+    if (!runtimeError) this.dockerRetryAt = 0;
+    const next = {
+      id, name: SERVICES[id].name, runtime: "docker",
+      command: `docker container ${config.containerName} (${container?.image || config.image})`,
+      status: container?.running ? "running" : "stopped",
+      startedAt: container?.running ? container.startedAt : undefined,
+      url: urls.ui, apiUrl: urls.api, containerName: config.containerName,
+      containerId: container?.id, containerStatus: container ? container.status : runtimeError ? undefined : "missing",
+      managed: container ? container.managed : undefined, runtimeError,
+    };
+    if (JSON.stringify(next) === JSON.stringify(svc)) return false;
+    state.services[id] = next;
+    return true;
+  }
+
   /**
    * Synchronous load with PID liveness check.
    */
@@ -219,7 +294,7 @@ export class ServiceManager {
 
     for (const id of Object.keys(state.services)) {
       const svc = state.services[id];
-      if (svc.status === "running") {
+      if (svc.status === "running" && !isDocker(id)) {
         if (!svc.pid || !isPidRunning(svc.pid)) {
           svc.status = "stopped";
           svc.pid = undefined;
@@ -336,6 +411,7 @@ export class ServiceManager {
    */
   async startService(serviceId, options) {
     if (serviceId === "proxy") return this.startProxyService(options);
+    if (isDocker(serviceId)) return this.startDockerService(serviceId);
     const def = SERVICES[serviceId];
     if (!def) {
       return { success: false, message: `Unknown service '${serviceId}'. Available: ${SERVICE_IDS.join(", ")}` };
@@ -396,6 +472,159 @@ export class ServiceManager {
       url: updatedSvc.url || def.defaultUrl,
       ...(serviceId === "ocx" ? { codexConfig: await this.configureCodexProxy({ waitForOcx: true }) } : {}),
     };
+  }
+
+  /** Starts (or creates) the Hindsight container and reports success only after /health. */
+  async startDockerService(id) {
+    const state = this.readState();
+    let config;
+    try { config = this.hindsightConfig(state, { strict: true }); }
+    catch (error) { return { success: false, message: `Invalid Hindsight settings: ${error.message}. Fix them with 'aih status --ui' (c).` }; }
+    const urls = hindsightUrls(config);
+    const base = { url: urls.ui, apiUrl: urls.api, containerName: config.containerName };
+    const docker = await dockerInfo(this.runDocker);
+    if (!docker.available) return { ...base, success: false, message: `Docker is not available (${docker.error}). Start Docker Desktop and retry.` };
+    this.dockerRetryAt = 0;
+    const key = readHindsightApiKey();
+    const configHash = hindsightConfigHash(config, key.key);
+    let container;
+    try { container = await inspectContainer(config.containerName, this.runDocker, 10000); }
+    catch (error) { return { ...base, success: false, message: `Cannot inspect the Hindsight container: ${error.message}` }; }
+    if (container?.running) {
+      const health = await this.probeHealth(urls.api);
+      await this.syncState();
+      const pending = container.managed && container.configHash !== configHash ? " Saved settings differ: restart it to apply them." : "";
+      return { ...base, success: true, alreadyRunning: true, containerId: container.id, health,
+        message: `Hindsight container '${config.containerName}' already running | health: ${describeHealth(health)}.${pending}` };
+    }
+    let action;
+    if (container?.managed && container.configHash !== configHash) {
+      // Settings changed: recreate it. The named volume keeps the memory data.
+      const removed = await dockerLogged(id, ["rm", config.containerName], this.runDocker, 60000);
+      if (removed.exitCode !== 0) return { ...base, success: false, message: `Cannot recreate the Hindsight container: ${dockerError(removed)}` };
+      container = null;
+      action = "recreated";
+    }
+    if (container) {
+      const started = await dockerLogged(id, ["start", config.containerName], this.runDocker, 120000);
+      if (started.exitCode !== 0) return { ...base, success: false, message: `docker start failed: ${dockerError(started)}. See 'aih logs hindsight'.` };
+      action = "started";
+    } else {
+      if (!key.key && requiresApiKey(config)) {
+        return { ...base, success: false, message: `Hindsight needs an LLM API key for provider '${config.llmProvider}': set it with 'aih status --ui' (c) or export ${HINDSIGHT_KEY_ENV}.` };
+      }
+      if (!(await imageId(config.image, this.runDocker))) {
+        const pulled = await dockerLogged(id, ["pull", config.image], this.runDocker, 30 * 60000);
+        if (pulled.exitCode !== 0) return { ...base, success: false, message: `docker pull ${config.image} failed: ${dockerError(pulled)}` };
+      }
+      const created = await dockerLogged(id, hindsightRunArgs(config, { configHash, keySource: key.source }), this.runDocker, 120000);
+      if (created.exitCode !== 0) return { ...base, success: false, message: `docker run failed: ${dockerError(created)}` };
+      action ||= "created";
+    }
+    const health = await this.waitForHindsight(config);
+    const synced = (await this.syncState()).services[id];
+    if (health.state !== "healthy") {
+      return { ...base, success: false, containerId: synced?.containerId, health,
+        message: `Hindsight container ${action}, but /health is ${describeHealth(health)}. Check 'aih logs hindsight'.` };
+    }
+    return { ...base, success: true, containerId: synced?.containerId, health,
+      message: `Hindsight container '${config.containerName}' ${action}; health: ${describeHealth(health)}` };
+  }
+
+  /** First boots initialize the database and download models: poll until healthy, exited or timed out. */
+  async waitForHindsight(config) {
+    const deadline = Date.now() + this.hindsightStartTimeoutMs;
+    const api = hindsightUrls(config).api;
+    for (let attempt = 0; ; attempt++) {
+      const health = await this.probeHealth(api);
+      if (health.state === "healthy" || Date.now() >= deadline) return health;
+      if (attempt % 5 === 4) {
+        const container = await inspectContainer(config.containerName, this.runDocker).catch(() => null);
+        if (!container?.running) return { ...health, state: "unreachable", error: `container ${container?.status || "missing"}` };
+      }
+      await sleep(this.hindsightPollMs);
+    }
+  }
+
+  async stopDockerService(id) {
+    const config = this.hindsightConfig();
+    // Never kill port owners: on Windows they are Docker Desktop's own processes.
+    const result = await dockerLogged(id, ["stop", config.containerName], this.runDocker, 60000);
+    await this.syncState();
+    if (result.exitCode !== 0 && !/no such container/i.test(result.stderr)) {
+      return { success: false, message: `docker stop ${config.containerName} failed: ${dockerError(result)}` };
+    }
+    return { success: true, message: `Hindsight container '${config.containerName}' stopped (data kept)` };
+  }
+
+  /** Pull, then recreate only containers aih created; other containers belong to their owner. */
+  async updateDockerService(id) {
+    if (this.updatesInProgress.has(id)) return { success: false, message: `An update for '${id}' is already in progress` };
+    this.updatesInProgress.add(id);
+    try {
+      const config = this.hindsightConfig(this.readState(), { strict: true });
+      const docker = await dockerInfo(this.runDocker);
+      if (!docker.available) return { success: false, message: `Docker is not available (${docker.error}). Start Docker Desktop and retry.` };
+      const container = await inspectContainer(config.containerName, this.runDocker, 10000);
+      if (container && !container.managed) {
+        return { success: false, message: `Container '${config.containerName}' was not created by aih${container.composeProject ? ` (docker compose project '${container.composeProject}')` : ""}; update it with the tool that created it, or remove it so aih can create its own.` };
+      }
+      const previousVersion = container?.running ? (await this.probeHealth(hindsightUrls(config).api)).version ?? null : null;
+      const pulled = await dockerLogged(id, ["pull", config.image], this.runDocker, 30 * 60000);
+      if (pulled.exitCode !== 0) return { success: false, previousVersion, message: `docker pull ${config.image} failed: ${dockerError(pulled)}` };
+      if (!container) return { success: true, updated: true, previousVersion, message: `Image ${config.image} pulled; the container is created on the next start` };
+      const pulledImage = await imageId(config.image, this.runDocker);
+      if (pulledImage && pulledImage === container.imageId) {
+        return { success: true, updated: false, alreadyUpToDate: true, previousVersion, version: previousVersion,
+          message: `'${id}' already uses the latest ${config.image}` };
+      }
+      const removed = await dockerLogged(id, ["rm", "-f", config.containerName], this.runDocker, 120000);
+      if (removed.exitCode !== 0) return { success: false, previousVersion, message: `Cannot replace the container: ${dockerError(removed)}` };
+      if (!container.running) {
+        await this.syncState();
+        return { success: true, updated: true, restarted: false, previousVersion,
+          message: `Image ${config.image} updated; the container is recreated on the next start (data volume kept)` };
+      }
+      const started = await this.startDockerService(id);
+      const version = started.health?.version ?? null;
+      return { ...started, updated: true, restarted: started.success, previousVersion, version,
+        message: started.success ? `'${id}' updated${previousVersion && version ? ` from ${previousVersion} to ${version}` : ""} and restarted`
+          : `Image updated, but restart failed: ${started.message}` };
+    } catch (error) {
+      return { success: false, message: `Update failed: ${error.message}` };
+    } finally {
+      this.updatesInProgress.delete(id);
+    }
+  }
+
+  /** Non-secret settings go to state.json; the key only to ~/.aih/hindsight.env. */
+  saveHindsightConfiguration({ config, apiKey = "" } = {}) {
+    const normalized = normalizeHindsightConfig(config);
+    if (apiKey) {
+      validateHindsightApiKey(apiKey);
+      saveHindsightApiKey(apiKey);
+    }
+    const state = this.readState();
+    state.config = { ...state.config, hindsight: normalized };
+    this.saveState(state);
+    return normalized;
+  }
+
+  /** Applies saved settings to a running aih-managed container by recreating it. */
+  async applyHindsightConfiguration() {
+    const config = this.hindsightConfig(this.readState());
+    let container;
+    try { container = await inspectContainer(config.containerName, this.runDocker, 10000); }
+    catch (error) { return { success: true, warning: true, message: `Hindsight settings saved; Docker not available (${error.message})` }; }
+    if (!container?.running) return { success: true, message: "Hindsight settings saved for its next start" };
+    if (!container.managed) {
+      return { success: true, warning: true, message: `Hindsight settings saved; container '${config.containerName}' was not created by aih and is left unchanged` };
+    }
+    if (container.configHash === hindsightConfigHash(config, readHindsightApiKey().key)) return { success: true, message: "Hindsight unchanged" };
+    const stopped = await this.stopDockerService("hindsight");
+    if (!stopped.success) return stopped;
+    const started = await this.startDockerService("hindsight");
+    return { ...started, message: started.success ? `Hindsight recreated with the new settings (${describeHealth(started.health)})` : started.message };
   }
 
   async startProxyService(options) {
@@ -494,6 +723,7 @@ export class ServiceManager {
    * Stops a single service cleanly, executing stop commands and clearing ports/workers.
    */
   async stopService(serviceId) {
+    if (isDocker(serviceId)) return this.stopDockerService(serviceId);
     const def = SERVICES[serviceId];
     const state = await this.syncState();
     const current = state.services[serviceId];
@@ -569,23 +799,33 @@ export class ServiceManager {
   }
 
   /** Desired configuration is separate from the running worker's snapshot. */
-  saveProxyConfiguration(options, { startServices } = {}) {
+  saveProxyConfiguration(options, { startServices, hindsight } = {}) {
     const config = normalizeProxyOptions(options);
     const startup = startServices === undefined ? undefined : normalizeStartServices(startServices);
+    // Validate everything before writing the key file or state.
+    if (hindsight) {
+      normalizeHindsightConfig(hindsight.config);
+      if (hindsight.apiKey) validateHindsightApiKey(hindsight.apiKey);
+      this.saveHindsightConfiguration(hindsight);
+    }
     const state = this.readState();
     state.config = { ...state.config, proxyOptions: savedProxyOptions(config) };
     if (startup) state.config.startServices = startup;
     this.saveState(state);
-    return { success: true, message: "Configuration saved for the next start/restart. Current proxy unchanged." };
+    return { success: true, message: `Configuration saved for the next start/restart. Current proxy${hindsight ? " and Hindsight" : ""} unchanged.` };
   }
 
   /** Validate before stopping; recover the old worker if applying the draft fails. */
-  async applyProxyConfiguration(options, { preflight = preflightProxy, startServices } = {}) {
+  async applyProxyConfiguration(options, { preflight = preflightProxy, startServices, hindsight } = {}) {
     if (this.proxySetupBusy) return { success: false, message: "Proxy setup already in progress" };
     this.proxySetupBusy = true;
     try {
       const config = normalizeProxyOptions(options);
       if (startServices !== undefined) startServices = normalizeStartServices(startServices);
+      if (hindsight) {
+        normalizeHindsightConfig(hindsight.config);
+        if (hindsight.apiKey) validateHindsightApiKey(hindsight.apiKey);
+      }
       const state = await this.syncState();
       const previous = state.services.proxy;
       const oldDesired = state.config?.proxyOptions;
@@ -594,7 +834,7 @@ export class ServiceManager {
       if (wasRunning) {
         const stopped = await this.stopService("proxy");
         if (!stopped.success) {
-          this.saveProxyConfiguration(config, { startServices });
+          this.saveProxyConfiguration(config, { startServices, hindsight });
           return { ...stopped, saved: true, applied: false,
             message: `Configuration saved, but not applied: could not stop the current proxy. ${stopped.message} If access is denied, stop/restart the proxy from a terminal with the same permissions (Administrator if it was started elevated), then retry. Saved settings will be used on the next start/restart.` };
         }
@@ -603,8 +843,10 @@ export class ServiceManager {
       try {
         const result = await this.startService("proxy", config);
         if (!result.success) throw new Error(result.message || "Startup failed");
-        this.saveProxyConfiguration(config, { startServices });
-        return { ...result, checks, message: ["Configuration applied and saved", ...(checks || []).filter(c => c.startsWith("Warning:"))].join(" | ") };
+        this.saveProxyConfiguration(config, { startServices, hindsight });
+        const memory = hindsight ? await this.applyHindsightConfiguration() : null;
+        return { ...result, checks, hindsight: memory, message: ["Configuration applied and saved", ...(memory ? [memory.message] : []),
+          ...(checks || []).filter(c => c.startsWith("Warning:"))].join(" | ") };
       } catch (error) {
         // A failed start may have persisted a runtime entry before a later error.
         try { await this.stopService("proxy"); } catch {}
@@ -649,6 +891,19 @@ export class ServiceManager {
    * Displays or follows logs for a service.
    */
   async showLogs(serviceId, lines = 50, follow = false) {
+    if (isDocker(serviceId)) {
+      const config = this.hindsightConfig();
+      const logPath = getServiceLogPath(serviceId);
+      if (existsSync(logPath)) console.log(gray(`[aih] Docker commands run by aih are logged in: ${logPath}`));
+      console.log(gray(`[aih] docker logs --tail ${lines}${follow ? " --follow" : ""} ${config.containerName}\n`));
+      await new Promise(resolve => {
+        const child = spawn("docker", ["logs", "--tail", String(lines), ...(follow ? ["--follow"] : []), config.containerName],
+          { stdio: "inherit", windowsHide: true });
+        child.once("error", error => { console.log(red(`[aih] Cannot run docker logs: ${error.message}`)); resolve(); });
+        child.once("exit", resolve);
+      });
+      return;
+    }
     const logPath = getServiceLogPath(serviceId);
     if (!existsSync(logPath)) {
       console.log(yellow(`[aih] No log file exists yet for '${serviceId}' at: ${logPath}`));

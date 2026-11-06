@@ -4,6 +4,24 @@ All notable changes to **`ai-helper` (`aih`)** are documented in this file.
 
 ---
 
+## [1.2.18] - 2026-11-06
+
+### Changed
+- **Hindsight replaces agentmemory** as the managed memory service. It runs as a Docker container (`ghcr.io/vectorize-io/hindsight`, API `127.0.0.1:8888`, UI `localhost:9999`, data in the `hindsight-data` volume) and is part of the default `aih start` / `aih up` selection. Saved Startup selections and state entries naming `agentmemory` migrate automatically; aih no longer discovers, starts or stops agentmemory.
+
+### Added
+- Docker-aware lifecycle: container state instead of PIDs, `docker start`/`run`/`stop` without killing Docker Desktop's port owners, `aih logs hindsight` via `docker logs`, start reported successful only after `/health` returns HTTP 200.
+- Existing containers with the configured name (e.g. docker compose) are reused untouched; containers created by aih are labelled and recreated when their settings change, keeping the data volume. `aih update hindsight` pulls the image and recreates only aih-managed containers.
+- Setup (`c` in `aih status --ui`) continues with Hindsight settings when it is selected in Startup: container, image, ports, volume, LLM provider/model/base URL, API key (stored only in `~/.aih/hindsight.env`) and an extra env file. Check verifies Docker, key, image, ports, ownership and health.
+- Live dashboard `HEALTH` and `LAST CHECK` columns for ocx (`/healthz`), headroom (`/health`), the built-in proxy, hindsight (`/health`) and standalone pxpipe (`/proxy-stats`), refreshed every 5 seconds and right after start/stop. Answers from a different service on the same port show as `unverified`.
+- The built-in proxy answers `GET /__aih/health` itself (never forwarded, recorded or passed to interceptors); a verified proxy is shown as `verified` in the pipeline.
+- The live dashboard (`aih status --ui`) is now entirely in English.
+
+### Removed
+- The URL/GitHub line under the live dashboard table; the `URL` and `REPO` columns and the `o`/`g` keys cover it.
+
+---
+
 ## [1.2.17] - 2026-11-06
 
 ### Fixed

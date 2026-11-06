@@ -35,16 +35,16 @@ This document details the architectural principles, process lifecycles, auto-dis
 ## 2. Process Tree Management
 
 ### The Orphan Process Problem
-When background daemons are spawned via npm or shell wrappers (`npx pxpipe-proxy`, `ocx start`, `npx @agentmemory/agentmemory`), the spawned process hierarchy often looks like:
+When background daemons are spawned via npm or shell wrappers (`npx pxpipe-proxy`, `ocx start`, `headroom proxy`), the spawned process hierarchy often looks like:
 
 ```text
 cmd.exe (or sh)
  └─► node.exe (npx-cli wrapper)
       └─► node.exe (actual worker / proxy server)
-           └─► iii.exe (sub-process engine / binary)
+           └─► python.exe / native sub-process
 ```
 
-If a process manager kills only the parent PID, the child `node.exe` and `iii.exe` processes remain running as orphans in the background, keeping network ports locked.
+If a process manager kills only the parent PID, the child `node.exe` and native worker processes remain running as orphans in the background, keeping network ports locked.
 
 ### Solution in ai-helper
 1. **Windows**: Uses `taskkill.exe /pid <PID> /T /F`:
@@ -64,7 +64,7 @@ Even if services are started outside `aih` (e.g. from separate PowerShell tabs, 
 In a single fast PowerShell CIM query:
 ```powershell
 $procs = Get-CimInstance Win32_Process | Where-Object { 
-  $_.CommandLine -and ($_.CommandLine -match 'pxpipe|ocx|agentmemory|iii') 
+  $_.CommandLine -and ($_.CommandLine -match 'pxpipe|ocx|headroom') 
 } | Select-Object ProcessId, ParentProcessId, Name, CommandLine, CreationDate
 
 $ports = Get-NetTCPConnection -State Listen | Select-Object LocalPort, OwningProcess
@@ -81,6 +81,17 @@ external-process discovery.
 
 ### Unix Implementation
 Uses `ps -eo pid,command` to match command line strings and extract active PIDs.
+
+### Docker services (Hindsight)
+Services with `runtime: "docker"` in `src/config.js` are never discovered from the
+process table. `syncState` reads `docker container inspect <name>` instead, so status,
+start time and container ID come from Docker and no PID is recorded. Stop runs
+`docker stop` and never kills listeners on the published ports: on Windows those
+belong to Docker Desktop (`com.docker.backend`, `wslrelay`). Readiness is the HTTP
+status of Hindsight's `GET /health`; the live dashboard polls it every 5 seconds.
+When Docker is unavailable, inspection is retried at most every 10 seconds so the
+one-second dashboard refresh never blocks on a stopped daemon. Implementation:
+`src/hindsight.js` (validation, docker argv, health probe, preflight).
 
 ---
 

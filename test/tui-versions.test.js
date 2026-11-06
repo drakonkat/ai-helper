@@ -3,7 +3,7 @@ import { Dashboard } from "../src/tui.js";
 import { manager } from "../src/manager.js";
 import { stripAnsi } from "../src/utils/format.js";
 
-const services = ["pxpipe", "ocx", "agentmemory", "headroom"].map((id, i) => ({
+const services = ["pxpipe", "ocx", "hindsight", "headroom"].map((id, i) => ({
   id, status: "running", pid: i + 100, uptime: "20m", url: `http://localhost:${3000 + i}`,
 }));
 const available = { version: "1.2.0", latestVersion: "1.3.0", updateAvailable: true };
@@ -18,16 +18,16 @@ describe("dashboard service versions", () => {
       dashboard.versions = {
         pxpipe: available,
         ocx: { version: "2.0.0", latestVersion: "2.0.0", updateAvailable: false },
-        agentmemory: { version: "0.9.29", latestVersion: null, updateAvailable: null },
+        hindsight: { version: "0.9.29", latestVersion: null, updateAvailable: null },
         headroom: { version: null, latestVersion: "1.0.0", updateAvailable: null },
       };
       const lines = dashboard.buildLines().map(stripAnsi);
       expect(lines[2]).toContain("VERSION");
       expect(lines[2]).toContain("UPDATE");
       expect(lines.find(line => line.includes("pxpipe"))).toMatch(/1\.2\.0\s+↑ 1\.3\.0/);
-      expect(lines.find(line => line.includes("ocx"))).toContain("aggiornato");
-      expect(lines.find(line => line.includes("agentmemory"))).toMatch(/0\.9\.29\s+n\/d/);
-      expect(lines.find(line => line.includes("headroom"))).toMatch(/n\/d\s+n\/d/);
+      expect(lines.find(line => line.includes("ocx"))).toContain("up to date");
+      expect(lines.find(line => line.includes("hindsight"))).toMatch(/0\.9\.29\s+n\/a/);
+      expect(lines.find(line => line.includes("headroom"))).toMatch(/n\/a\s+n\/a/);
       expect(lines.every(line => line.length <= 80)).toBe(true);
     } finally {
       process.stdout.columns = columns;
@@ -73,7 +73,7 @@ describe("dashboard service versions", () => {
     const dashboard = new Dashboard({ getVersions });
     dashboard.statuses = services;
     const checking = dashboard.refreshVersions();
-    expect(dashboard.buildLines().map(stripAnsi).join("\n")).toContain("verifica...");
+    expect(dashboard.buildLines().map(stripAnsi).join("\n")).toContain("checking...");
     dashboard.statuses = services.map(s => ({ ...s, status: "stopped" }));
     await dashboard.refreshVersions();
     expect(getVersions).toHaveBeenCalledTimes(1);
@@ -88,7 +88,7 @@ describe("dashboard service versions", () => {
     expect(getVersions).toHaveBeenCalledTimes(2);
   });
 
-  it("degrades a failed check to n/d without retrying every second", async () => {
+  it("degrades a failed check to n/a without retrying every second", async () => {
     const getVersions = mock(async () => { throw new Error("offline"); });
     const dashboard = new Dashboard({ getVersions });
     dashboard.statuses = services;
@@ -97,8 +97,8 @@ describe("dashboard service versions", () => {
     expect(dashboard.versionsLoading).toBe(false);
     expect(getVersions).toHaveBeenCalledTimes(1);
     const row = dashboard.buildLines().map(stripAnsi).find(line => line.includes("pxpipe"));
-    expect(row).toMatch(/n\/d\s+n\/d/);
-    expect(row).not.toContain("aggiornato");
+    expect(row).toMatch(/n\/a\s+n\/a/);
+    expect(row).not.toContain("up to date");
   });
 
   it("updates the selected stopped service once and refreshes its version cache", async () => {
@@ -120,7 +120,7 @@ describe("dashboard service versions", () => {
       expect(update).toHaveBeenCalledTimes(1);
       expect(update).toHaveBeenCalledWith("ocx");
       expect(dashboard.busy).toBe(true);
-      expect(stripAnsi(dashboard.status)).toContain("Aggiornamento ocx");
+      expect(stripAnsi(dashboard.status)).toContain("Update ocx");
       finish({ success: true, message: "Updated to 2.49.0" });
       await updating;
       expect(dashboard.busy).toBe(false);

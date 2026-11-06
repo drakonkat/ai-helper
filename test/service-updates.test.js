@@ -44,7 +44,7 @@ function fixture({ id = "ocx", status = "stopped", versions = ["2.42.0", "2.49.0
 }
 
 describe("service installer command allowlist", () => {
-  for (const [id, name] of [["ocx", "@bitkyc08/opencodex"], ["pxpipe", "pxpipe-proxy"], ["agentmemory", "@agentmemory/agentmemory"]]) {
+  for (const [id, name] of [["ocx", "@bitkyc08/opencodex"], ["pxpipe", "pxpipe-proxy"]]) {
     it(`selects a fixed npm latest command for ${id} on Unix and Windows`, () => {
       for (const platform of ["linux", "darwin"]) {
         expect(serviceUpdateInvocation(id, platform)).toEqual({
@@ -64,7 +64,7 @@ describe("service installer command allowlist", () => {
   });
 
   it("rejects proxy, unknown identifiers, inherited keys, and shell text before spawning", () => {
-    for (const id of ["aih", "proxy", "missing", "constructor", "__proto__", "ocx & whoami", "../ocx"]) {
+    for (const id of ["aih", "proxy", "hindsight", "missing", "constructor", "__proto__", "ocx & whoami", "../ocx"]) {
       expect(() => serviceUpdateInvocation(id)).toThrow("cannot be updated separately");
       expect(() => installServiceUpdate(id, { spawnImpl: () => { throw new Error("must not spawn"); } })).toThrow("cannot be updated separately");
     }
@@ -74,11 +74,11 @@ describe("service installer command allowlist", () => {
 describe("pinned npx launch commands", () => {
   it("pins npx services to the explicitly verified installation version", () => {
     expect(serviceStartCommand("pxpipe", { launchVersion: " v1.2.3 " })).toBe("npx --yes pxpipe-proxy@1.2.3");
-    expect(serviceStartCommand("agentmemory", { launchVersion: "0.9.30-rc.1+build.2" })).toBe("npx --yes @agentmemory/agentmemory@0.9.30-rc.1+build.2");
+    expect(serviceStartCommand("pxpipe", { launchVersion: "0.9.30-rc.1+build.2" })).toBe("npx --yes pxpipe-proxy@0.9.30-rc.1+build.2");
   });
 
   it("ignores absent, malformed, and shell-injection launch versions", () => {
-    for (const id of ["pxpipe", "agentmemory"]) {
+    for (const id of ["pxpipe"]) {
       expect(serviceStartCommand(id)).toBe(SERVICES[id].command);
       for (const launchVersion of [null, 12, "latest", "1.2", "1.2.3 && whoami", "1.2.3\nwhoami", "1.2.3;whoami", "$(whoami)", "1.2.3\u001b[0m"]) {
         expect(serviceStartCommand(id, { launchVersion })).toBe(SERVICES[id].command);
@@ -87,7 +87,7 @@ describe("pinned npx launch commands", () => {
   });
 
   it("does not change non-npx commands", () => {
-    for (const id of ["ocx", "headroom"]) expect(serviceStartCommand(id, { launchVersion: "2.49.0" })).toBe(SERVICES[id].command);
+    for (const id of ["ocx", "headroom", "hindsight"]) expect(serviceStartCommand(id, { launchVersion: "2.49.0" })).toBe(SERVICES[id].command);
   });
 });
 
@@ -114,7 +114,7 @@ describe("ServiceManager.updateService", () => {
   });
 
   it("realigns a stale npx pin when the stopped global installation is already current", async () => {
-    for (const id of ["pxpipe", "agentmemory"]) {
+    for (const id of ["pxpipe"]) {
       const f = fixture({ id, versions: ["2.49.0"] });
       const state = f.state();
       state.services[id].launchVersion = "2.42.0";
@@ -175,7 +175,7 @@ describe("ServiceManager.updateService", () => {
   });
 
   it("persists a verified npx pin before restarting and preserves stopped state", async () => {
-    for (const id of ["pxpipe", "agentmemory"]) {
+    for (const id of ["pxpipe"]) {
       for (const status of ["running", "stopped"]) {
         const f = fixture({ id, status });
         expect(await f.run()).toMatchObject({ success: true, updated: true, restarted: status === "running" });
@@ -246,13 +246,13 @@ describe("ServiceManager.updateService", () => {
 
   it("rejects stale or unknown installed versions despite installer success and never pins them", async () => {
     for (const version of ["2.42.0", null, undefined, "invalid"]) {
-      const f = fixture({ id: "agentmemory", status: "running", versions: ["2.42.0", version] });
+      const f = fixture({ id: "pxpipe", status: "running", versions: ["2.42.0", version] });
       const result = await f.run();
       expect(result).toMatchObject({ success: false, updated: false, restarted: true });
       expect(result.message).toContain("expected 2.49.0");
       expect(f.calls).not.toContain("save");
       expect(f.calls.filter(c => c === "start")).toHaveLength(1);
-      expect(f.state().services.agentmemory.launchVersion).toBeUndefined();
+      expect(f.state().services.pxpipe.launchVersion).toBeUndefined();
     }
   });
 

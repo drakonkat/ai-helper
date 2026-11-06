@@ -13,7 +13,6 @@ $PackageManager = 'WinGet'
 $AihVersion = 'latest'
 $OpenCodexVersion = 'latest'
 $PxpipeVersion = 'latest'
-$AgentMemoryVersion = 'latest'
 $main = Join-Path $PSScriptRoot 'Restore-Workstation.ps1'
 $ue = Join-Path $PSScriptRoot 'Restore-Neden.ps1'
 $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -163,8 +162,9 @@ try {
     }
     Run-Test 'base npm catalog includes aih and each default service without CLI confusion' {
         $tools = @(Get-AihNpmTools)
-        Assert ($tools.Count -eq 4) 'Incomplete base toolchain'
-        Assert ('@bitkyc08/opencodex' -in $tools.Package -and 'pxpipe-proxy' -in $tools.Package -and '@agentmemory/agentmemory' -in $tools.Package) 'Missing service packages'
+        Assert ($tools.Count -eq 3) 'Incomplete base toolchain'
+        Assert ('@bitkyc08/opencodex' -in $tools.Package -and 'pxpipe-proxy' -in $tools.Package ) 'Missing service packages'
+        Assert ('@agentmemory/agentmemory' -notin $tools.Package) 'agentmemory was replaced by Hindsight (Docker)'
         Assert (($tools | Where-Object Package -eq '@bitkyc08/opencodex').Command -eq 'ocx.cmd') 'Wrong OpenCodex executable'
         Assert (($tools | Where-Object Package -eq 'pxpipe-proxy').Command -eq 'pxpipe.cmd') 'Wrong pxpipe executable'
         Assert ('@openai/codex' -notin $tools.Package) 'OpenCodex confused with Codex CLI'

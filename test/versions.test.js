@@ -31,26 +31,26 @@ describe("service version probes", () => {
     const calls = [];
     const result = await getServiceVersions([
       { id: "ocx", status: "running", url: "http://localhost:10100/dashboard" },
-      { id: "agentmemory", status: "running", url: "http://localhost:3113" },
+      { id: "hindsight", status: "running", url: "http://localhost:9999", apiUrl: "http://127.0.0.1:8888" },
       { id: "headroom", status: "running", url: "http://localhost:8788/dashboard" },
     ], {
       request: async (url, timeout) => {
         calls.push([url, timeout]);
         if (url.endsWith("/healthz")) return { service: "opencodex", version: "v2.9.0" };
-        if (url.endsWith("/agentmemory/health")) return { service: "agentmemory", version: "0.9.29" };
+        if (url === "http://127.0.0.1:8888/health/live") return { status: "alive", version: "1.1.0" };
         if (url.endsWith("/health")) return { version: "0.12.0+local" };
         if (url.includes("opencodex")) return { version: "2.10.0" };
-        if (url.includes("agentmemory")) return { version: "0.9.29" };
+        if (url.includes("vectorize-io/hindsight")) return { tag_name: "v1.2.0" };
         return { info: { version: "0.11.0" } };
       },
       processCommands: () => { throw new Error("health should avoid process lookup"); },
       installedVersion: () => { throw new Error("health should avoid fallback"); },
     });
     expect(result.ocx).toEqual({ version: "2.9.0", latestVersion: "2.10.0", updateAvailable: true });
-    expect(result.agentmemory.updateAvailable).toBe(false);
+    expect(result.hindsight).toEqual({ version: "1.1.0", latestVersion: "1.2.0", updateAvailable: true });
     expect(result.headroom.updateAvailable).toBe(false);
     expect(calls.map(([url]) => url)).toContain("https://registry.npmjs.org/%40bitkyc08%2Fopencodex/latest");
-    expect(calls.map(([url]) => url)).toContain("https://registry.npmjs.org/%40agentmemory%2Fagentmemory/latest");
+    expect(calls.map(([url]) => url)).toContain("https://api.github.com/repos/vectorize-io/hindsight/releases/latest");
     expect(calls.map(([url]) => url)).toContain("https://pypi.org/pypi/headroom-ai/json");
     expect(calls.every(([, timeout]) => timeout > 0 && timeout <= 3000)).toBe(true);
   });
@@ -61,7 +61,7 @@ describe("service version probes", () => {
     const result = await getServiceVersions([
       { id: "pxpipe", status: "running", pid: 10 },
       { id: "ocx", status: "running", pid: 20, url: "http://localhost:10100" },
-      { id: "agentmemory", status: "stopped" },
+      { id: "hindsight", status: "stopped", apiUrl: "http://127.0.0.1:8888" },
       { id: "headroom", status: "stopped" },
     ], {
       request: async url => {
@@ -82,7 +82,7 @@ describe("service version probes", () => {
     expect(commands).toContainEqual(["ocx", "ocx process"]);
     expect(result.pxpipe.updateAvailable).toBe(true);
     expect(result.ocx).toEqual({ version: "2.42.0", latestVersion: null, updateAvailable: null });
-    expect(result.agentmemory.latestVersion).toBeNull();
+    expect(result.hindsight).toEqual({ version: null, latestVersion: null, updateAvailable: null });
     expect(result.headroom).toEqual({ version: null, latestVersion: "0.12.0", updateAvailable: null });
   });
 
@@ -109,7 +109,7 @@ it("reads exact running package metadata even when paths contain spaces", async 
     writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "pxpipe-proxy", version: "0.13.2" }));
     const command = `node "${join(pkg, "bin", "cli.js")}"`;
     expect(await readNpmVersionFromCommand(command, "pxpipe-proxy")).toBe("0.13.2");
-    expect(await readNpmVersionFromCommand(command, "@agentmemory/agentmemory")).toBeNull();
+    expect(await readNpmVersionFromCommand(command, "@bitkyc08/opencodex")).toBeNull();
     expect(await readNpmVersionFromCommand("npx pxpipe-proxy", "pxpipe-proxy")).toBeNull();
     writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "other-package", version: "99.0.0" }));
     expect(await readNpmVersionFromCommand(command, "pxpipe-proxy")).toBeNull();
