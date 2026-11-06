@@ -135,5 +135,14 @@ describe("tool PATH refresh", () => {
     expect(env.PATH.endsWith(local)).toBe(true);
     expect(refreshToolPath(options)).toEqual([]);
   });
+
+  it("finds uv installed with pip --user on Windows", () => {
+    const appData = join("C:", "Users", "me", "AppData", "Roaming");
+    const scripts = join(appData, "Python", "Python315", "Scripts");
+    const env = { PATH: "C:\\Windows", APPDATA: appData };
+    const options = { env, platform: "win32", home: join("C:", "Users", "me"),
+      exists: dir => dir === scripts, list: dir => dir === join(appData, "Python") ? ["Python315", "pip"] : [] };
+    expect(refreshToolPath(options)).toEqual([scripts]);
+  });
 });
 

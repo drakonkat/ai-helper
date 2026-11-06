@@ -4,6 +4,13 @@ All notable changes to **`ai-helper` (`aih`)** are documented in this file.
 
 ---
 
+## [1.2.17] - 2026-11-06
+
+### Fixed
+- Windows: updating Headroom from the TUI or `aih update headroom` no longer fails with "`uv` was not found on PATH". aih now also looks for tools installed with `pip install --user` (`%APPDATA%\Python\Python3XX\Scripts`, and `~/Library/Python/3.X/bin` on macOS), where it bootstraps uv.
+
+---
+
 ## [1.2.16] - 2026-10-28
 
 ### Changed

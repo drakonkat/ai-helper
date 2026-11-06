@@ -8,16 +8,22 @@ import { delimiter, join } from "node:path";
  */
 export function toolSearchDirectories({ platform = process.platform, env = process.env, home = homedir(), exists = existsSync, list = readdirSync } = {}) {
   const dirs = [join(home, ".local", "bin")];
-  const pythons = root => {
+  const versions = (root, pattern) => {
     try {
-      return list(root).filter(name => /^Python3\d+$/i.test(name)).sort().reverse().flatMap(name => [join(root, name), join(root, name, "Scripts")]);
+      return list(root).filter(name => pattern.test(name)).sort().reverse();
     } catch { return []; }
   };
+  const pythons = root => versions(root, /^Python3\d+$/i).flatMap(name => [join(root, name), join(root, name, "Scripts")]);
   if (platform === "win32") {
     if (env.LOCALAPPDATA) dirs.push(...pythons(join(env.LOCALAPPDATA, "Programs", "Python")));
     if (env.ProgramFiles) dirs.push(...pythons(env.ProgramFiles));
+    // `pip install --user` (how aih bootstraps uv) puts scripts in %APPDATA%\Python\Python3XX\Scripts.
+    // Headroom's own updater runs `uv tool upgrade` and fails when uv is not found there.
+    if (env.APPDATA) dirs.push(...versions(join(env.APPDATA, "Python"), /^Python3\d+$/i).map(name => join(env.APPDATA, "Python", name, "Scripts")));
   } else {
     dirs.push("/opt/homebrew/bin", "/usr/local/bin");
+    // macOS framework builds put `pip install --user` scripts in ~/Library/Python/3.X/bin.
+    if (platform === "darwin") dirs.push(...versions(join(home, "Library", "Python"), /^3\.\d+$/).map(name => join(home, "Library", "Python", name, "bin")));
   }
   return dirs.filter(dir => exists(dir));
 }
