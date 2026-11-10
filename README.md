@@ -112,13 +112,32 @@ not by PID, and never kills processes on its ports (on Windows they belong to Do
 - **stop** runs `docker stop`; data stays in the volume. **logs** shows `docker logs`;
   the docker commands run by aih are recorded in `~/.aih/logs/hindsight.log`.
 - **An existing container with the same name is reused as is**, for example one created
-  by docker compose. aih starts/stops it but never recreates or updates it.
+  by docker compose. aih starts/stops it but never recreates or updates it until you
+  adopt it.
+- **adopt** (`aih update hindsight --adopt`, or `u` twice in the dashboard: the first
+  press explains, the second adopts) makes aih the owner of such a container. aih reads
+  its image, published ports, data volume and environment, saves provider, model and
+  base URL in the settings, the LLM key in `~/.aih/hindsight.env` and every other
+  variable set on top of the image (failover models, timeouts...) in
+  `~/.aih/hindsight-extra.env`, then stops it and recreates it on the same volume with
+  the same image. Ports are published on loopback only. Adoption is refused, changing
+  nothing, unless the data is in a single Docker volume mounted at
+  `/home/hindsight/.pg0`. Afterwards stop using the tool that created the container
+  (`docker compose up` would conflict on the name).
 - Containers created by aih carry the labels `io.aih.managed=true` and a settings
   fingerprint: after a settings change they are recreated on the next start (or by
   *Save and apply now* if running), always keeping the data volume.
-- **update** (`aih update hindsight` or `u`) pulls the configured image and recreates
-  an aih-managed container only if the image changed; a running one is restarted and
-  checked again through `/health`.
+- **update** (`aih update hindsight` or `u`) works on containers created or adopted by
+  aih. When the image is the official one with a version tag (`:1.1.0`), it pulls the
+  latest GitHub release and saves the new tag in the settings; any other tag
+  (`:latest`, custom images) is pulled again and nothing happens if the image did not
+  change. Before replacing the container aih stops it and archives the data volume to
+  `~/.aih/backups/hindsight-<timestamp>.tgz` (the two most recent are kept), because a
+  newer version may migrate the database. If the archive fails, the old container is
+  started again and nothing changes. A running container is recreated and checked again
+  through `/health`. To go back, restore the archive into the volume with the container
+  stopped and set the previous tag in the settings:
+  `docker run --rm -v hindsight-data:/d -v ~/.aih/backups:/b alpine sh -c "rm -rf /d/* /d/.[!.]* && tar xzf /b/<file> -C /d"`.
 
 Settings are edited in `aih status --ui` → **`c`** after selecting **hindsight** in the
 Startup step: container name, image (default `ghcr.io/vectorize-io/hindsight:latest`),
@@ -167,7 +186,7 @@ spaces, such as `--interceptor "./my hooks/interceptor.mjs"`.
 | `restart [services...] [--json]` | `aih restart ocx hindsight --json` |
 | `restart proxy [upstream] [proxy options] [--json]` | `aih restart proxy --models="gpt-6-astra,anthropic/claude-fable*"` |
 | `update [--json]` | `aih update` (update aih itself from npm) |
-| `update <services...> [--json]` | `aih update ocx hindsight --json`; `aih ocx update` |
+| `update <services...> [--json] [--adopt]` | `aih update ocx hindsight --json`; `aih ocx update`; `aih update hindsight --adopt` |
 | `open [services...] [--repo]` | `aih open hindsight`; `aih open proxy --repo` |
 | `logs <service> [-n <lines>] [-f]` | `aih logs proxy --lines=100 --follow` |
 | `stats proxy [--json]` | `aih stats proxy --json` |
@@ -372,6 +391,7 @@ built-in proxy with `aih restart proxy` to load the updated code.
 aih ocx update                     # update OpenCodex to the latest available release
 aih update ocx                     # equivalent command-first form
 aih update ocx hindsight           # update selected services
+aih update hindsight --adopt       # take over a Hindsight container not created by aih
 aih update pxpipe ocx hindsight headroom    # all managed services, not aih itself
 aih update ocx --json              # JSON result array, exit code 1 on any failure
 ```

@@ -6,9 +6,10 @@ import { ensureDir, getAihDir, getLogsDir, getServiceLogPath } from "./utils/pat
 import { execCommand } from "./utils/process.js";
 
 /** Hindsight runs in Docker; these defaults match the upstream quick start. */
+export const HINDSIGHT_REPOSITORY = "ghcr.io/vectorize-io/hindsight";
 export const HINDSIGHT_DEFAULTS = Object.freeze({
   containerName: "hindsight",
-  image: "ghcr.io/vectorize-io/hindsight:latest",
+  image: HINDSIGHT_REPOSITORY + ":latest",
   apiPort: 8888,
   uiPort: 9999,
   volume: "hindsight-data",
@@ -154,7 +155,35 @@ export async function inspectContainer(name, run = execCommand, timeout = 5000) 
     managed: labels["io.aih.managed"] === "true",
     configHash: labels["io.aih.config"] || null,
     composeProject: labels["com.docker.compose.project"] || null,
+    // Read only to adopt a container aih did not create.
+    env: container?.Config?.Env || [],
+    mounts: (container?.Mounts || []).map(m => ({ type: m.Type, name: m.Name, destination: m.Destination })),
+    ports: container?.HostConfig?.PortBindings || {},
   };
+}
+
+/**
+ * Settings that let aih recreate a container it did not create: image, ports, data volume and
+ * the variables set on top of its image. Throws when something would be lost.
+ */
+export function adoptedHindsightSettings(containerName, container, imageEnv) {
+  const data = container.mounts.find(m => m.destination === DATA_DIR);
+  if (data?.type !== "volume" || container.mounts.length !== 1) {
+    throw new Error("its data must be in one Docker volume mounted at " + DATA_DIR + ", with no other mounts");
+  }
+  const inherited = new Set(imageEnv);
+  const env = new Map(container.env.filter(line => !inherited.has(line)).map(line => line.split(/=(.*)/s).slice(0, 2)));
+  const take = name => { const value = env.get(name); env.delete(name); return value; };
+  const hostPort = port => container.ports[port + "/tcp"]?.[0]?.HostPort;
+  take("HINDSIGHT_CP_DATAPLANE_API_URL"); // always set by aih
+  const key = validateHindsightApiKey(take(HINDSIGHT_KEY_ENV) || "");
+  const config = normalizeHindsightConfig({
+    containerName, image: container.image, volume: data.name, apiPort: hostPort(API_PORT), uiPort: hostPort(UI_PORT),
+    llmProvider: take("HINDSIGHT_API_LLM_PROVIDER"), llmModel: take("HINDSIGHT_API_LLM_MODEL"), llmBaseUrl: take("HINDSIGHT_API_LLM_BASE_URL"),
+  });
+  const extra = [...env].map(([name, value]) => name + "=" + value);
+  if (extra.some(line => /[\r\n]/.test(line))) throw new Error("a multi-line environment value cannot be written to an env file");
+  return { config, key, extra };
 }
 
 export async function imageId(image, run = execCommand) {
@@ -239,7 +268,7 @@ export async function preflightHindsight(config, { newKey = "", run = execComman
   let container = null;
   try { container = await inspectContainer(config.containerName, run); } catch (error) { checks.push("Warning: " + error.message); }
   if (container) {
-    const owner = container.managed ? "created by aih" : "not created by aih" + (container.composeProject ? " (compose project '" + container.composeProject + "')" : "") + "; it is reused as is and the settings above do not change it";
+    const owner = container.managed ? "created by aih" : "not created by aih" + (container.composeProject ? " (compose project '" + container.composeProject + "')" : "") + "; it is reused as is and the settings above do not change it. To manage it from aih, adopt it: press u on hindsight in the dashboard";
     checks.push("Container '" + config.containerName + "' " + container.status + ", " + owner);
     if (container.managed && container.configHash !== hindsightConfigHash(config, newKey || saved.key)) {
       checks.push("Settings changed: aih recreates the container on its next start (data volume kept)");

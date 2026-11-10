@@ -91,7 +91,13 @@ belong to Docker Desktop (`com.docker.backend`, `wslrelay`). Readiness is the HT
 status of Hindsight's `GET /health`; the live dashboard polls it every 5 seconds.
 When Docker is unavailable, inspection is retried at most every 10 seconds so the
 one-second dashboard refresh never blocks on a stopped daemon. Implementation:
-`src/hindsight.js` (validation, docker argv, health probe, preflight).
+`src/hindsight.js` (validation, docker argv, health probe, preflight, adoption settings).
+
+Only containers labelled `io.aih.managed=true` are recreated. Any other container is
+reused as is until the user adopts it (`update --adopt`): its image, ports, volume and
+the environment it adds to its image become aih's settings, and aih recreates it.
+Update stops the container, archives its volume to `~/.aih/backups` and only then
+removes it; it never uses `docker rm -f`, which would SIGKILL the embedded database.
 
 ---
 

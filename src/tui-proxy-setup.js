@@ -14,8 +14,8 @@ const STARTUP_FIELD = { key: "startServices", group: "Startup", label: "Services
 
 /** Shown only when Hindsight is selected for start/up. "config" maps to the saved settings. */
 export const HINDSIGHT_FIELDS = Object.freeze([
-  { key: "hindsightContainer", config: "containerName", group: "Hindsight", label: "Hindsight container name", help: "Docker container started/stopped by aih. An existing container with this name is reused as is; the settings below apply only to containers aih creates." },
-  { key: "hindsightImage", config: "image", group: "Hindsight", label: "Docker image", help: "Default ghcr.io/vectorize-io/hindsight:latest. Pin a tag (e.g. :1.1.0) for repeatable installs." },
+  { key: "hindsightContainer", config: "containerName", group: "Hindsight", label: "Hindsight container name", help: "Docker container started/stopped by aih. An existing container with this name is reused as is; the settings below apply only to containers aih creates or adopts (u on hindsight in the dashboard imports an existing container's settings)." },
+  { key: "hindsightImage", config: "image", group: "Hindsight", label: "Docker image", help: "Default ghcr.io/vectorize-io/hindsight:latest. Pin a version (e.g. :1.2.0) for repeatable installs: update (u) moves it to the latest release." },
   { key: "hindsightApiPort", config: "apiPort", group: "Hindsight", label: "API port", help: "Loopback port for the Hindsight API and its /health check. Default 8888." },
   { key: "hindsightUiPort", config: "uiPort", group: "Hindsight", label: "Web UI port", help: "Loopback port of the Hindsight control plane, opened with o in the dashboard. Default 9999." },
   { key: "hindsightVolume", config: "volume", group: "Hindsight", label: "Data volume", help: "Docker volume holding the memory database (/home/hindsight/.pg0). Kept when the container is recreated or updated." },
@@ -216,7 +216,7 @@ export class ProxySetupWizard {
           const after = this.draft[f.key];
           return wrap(`${before !== after ? "* " : "  "}${f.label}: ${after || "(none)"}${before !== after ? ` (previous: ${before || "empty"})` : ""}`);
         }));
-        body.push(...wrap("Hindsight: settings are saved; apply recreates a running container created by aih (data volume kept). Other containers are left unchanged."));
+        body.push(...wrap("Hindsight: settings are saved; apply recreates a running container created by aih (data volume kept). Other containers are left unchanged until adopted (u on the dashboard)."));
       }
       body.push(...wrap(this.running ? "WARNING: apply now restarts the proxy and interrupts active requests/streams." : "Apply now starts the proxy. Save only leaves it stopped."));
       body.push(...this.checks.flatMap(wrap));

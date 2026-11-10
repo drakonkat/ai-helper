@@ -685,6 +685,9 @@ export class Dashboard {
       return;
     }
 
+    // Adopting a container needs a second, consecutive u on the same service.
+    const adopt = key === "u" && this.adoptPending === this.currentService()?.id;
+    this.adoptPending = null;
     switch (key) {
       case "c":
         if (this.busy) return;
@@ -717,7 +720,9 @@ export class Dashboard {
         return this.runAction("Update", async svc => {
           this.invalidateVersions();
           try {
-            return await manager.updateService(svc.id);
+            const result = await manager.updateService(svc.id, { adopt });
+            if (result.adoptable) this.adoptPending = svc.id;
+            return result;
           } finally {
             // Drop pre-update and mid-update checks even if installation failed.
             this.invalidateVersions();

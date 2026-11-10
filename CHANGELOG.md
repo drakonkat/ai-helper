@@ -4,6 +4,16 @@ All notable changes to **`ai-helper` (`aih`)** are documented in this file.
 
 ---
 
+## [1.2.19] - 2026-11-10
+
+### Added
+- **Adopt an existing Hindsight container**: `aih update hindsight --adopt`, or `u` twice in the live dashboard, imports the image, ports, data volume and environment of a container aih did not create (for example docker compose) into aih's settings and recreates it on the same volume. Without that explicit request such containers are still left untouched.
+- `aih update hindsight` archives the data volume to `~/.aih/backups` (two most recent kept) before replacing the container; a failed archive leaves the old container running.
+
+### Changed
+- `aih update hindsight` moves a version tag of the official image (e.g. `:1.1.0`) to the latest GitHub release and saves it in the settings, instead of pulling the same tag again. `:latest` and custom images behave as before.
+- Hindsight updates stop the container before removing it instead of `docker rm -f`.
+
 ## [1.2.18] - 2026-11-06
 
 ### Changed

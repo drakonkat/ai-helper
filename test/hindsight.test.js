@@ -36,9 +36,10 @@ const exited = { Status: "exited", Running: false, StartedAt: "2026-11-06T10:00:
 const container = ({ labels = {}, state = exited, image = "sha256:old" } = {}) => ({
   Id: "0123456789abcdef", Image: image, Config: { Image: HINDSIGHT_DEFAULTS.image, Labels: labels }, State: state,
 });
+const IMAGE_ENV = ["PATH=/usr/bin", "HINDSIGHT_API_PORT=8888", "HINDSIGHT_CP_DATAPLANE_API_URL=http://localhost:8888"];
 
 /** Docker CLI double: records argv, never touches a real daemon. */
-function fakeDocker({ current = null, image = "sha256:new", available = true, runExit = 0 } = {}) {
+function fakeDocker({ current = null, image = "sha256:new", available = true, runExit = 0, backupExit = 0 } = {}) {
   const calls = [];
   let state = current;
   const run = async (command, args) => {
@@ -48,9 +49,12 @@ function fakeDocker({ current = null, image = "sha256:new", available = true, ru
     switch (args[0]) {
       case "version": return ok("29.0.0\n");
       case "container": return state ? ok(JSON.stringify([state])) : fail("Error response from daemon: No such container: " + args[2]);
-      case "image": return image ? ok(image + "\n") : fail("Error: No such image");
+      case "image":
+        if (args.includes("{{json .Config.Env}}")) return ok(JSON.stringify(IMAGE_ENV));
+        return image ? ok(image + "\n") : fail("Error: No such image");
       case "pull": image = "sha256:new"; return ok("pulled");
       case "run": {
+        if (args.includes("--rm")) return backupExit ? fail("tar: write error") : ok("");
         if (runExit) return fail("port is already allocated");
         const labels = Object.fromEntries(args.flatMap((a, i) => a === "--label" ? [args[i + 1].split("=")] : []));
         state = container({ labels, state: running, image });
@@ -216,6 +220,7 @@ test("update pulls and recreates only aih containers", async () => {
   const foreign = fakeDocker({ current: container({ state: running, labels: { "com.docker.compose.project": "hindsight" } }) });
   const refused = await dockerManager(foreign).updateService("hindsight");
   assert.equal(refused.success, false);
+  assert.equal(refused.adoptable, true);
   assert.match(refused.message, /not created by aih \(docker compose project 'hindsight'\)/);
   assert.ok(!foreign.verbs().includes("pull"));
 
@@ -231,9 +236,108 @@ test("update pulls and recreates only aih containers", async () => {
   m.runDocker = async (command, args) => { if (args[0] === "pull") version = "1.2.0"; return pull(command, args); };
   const updated = await m.updateService("hindsight");
   assert.equal(updated.success, true, updated.message);
-  assert.match(updated.message, /updated from 1\.1\.0 to 1\.2\.0 and restarted/);
-  assert.deepEqual(outdated.calls.find(a => a[0] === "rm"), ["rm", "-f", "hindsight"]);
+  assert.match(updated.message, /updated from 1\.1\.0 to 1\.2\.0 and restarted \(data backup: .*hindsight-\d{8}T\d{6}\.tgz\)/);
+  // Graceful stop, archive of the volume with the old image, then removal without -f or -v.
+  assert.deepEqual(outdated.verbs().slice(4, 8), ["stop", "run", "rm", "version"]);
+  const backup = outdated.calls.find(a => a[0] === "run" && a.includes("--rm"));
+  assert.ok(backup.includes("hindsight-data:/d:ro") && backup.includes(join(home, "backups") + ":/b") && backup.includes("sha256:old"), backup.join(" "));
+  assert.deepEqual(outdated.calls.find(a => a[0] === "rm"), ["rm", "hindsight"]);
   assert.equal(m.updatesInProgress.size, 0);
+
+  const broken = fakeDocker({ current: container({ state: running, labels }), backupExit: 1 });
+  const kept = await dockerManager(broken).updateService("hindsight");
+  assert.equal(kept.success, false);
+  assert.match(kept.message, /Data backup failed: tar: write error; the current container is kept/);
+  assert.ok(!broken.verbs().includes("rm"));
+  assert.equal(broken.state.State.Running, true, "the old container is started again");
+});
+
+test("update moves a release tag of the official image to the latest release", async () => {
+  const config = normalizeHindsightConfig({ image: "ghcr.io/vectorize-io/hindsight:1.1.0" });
+  const labels = { "io.aih.managed": "true", "io.aih.config": hindsightConfigHash(config, readHindsightApiKey().key) };
+  const releases = latestVersion => ({ getVersions: async () => ({ hindsight: { latestVersion } }) });
+
+  const docker = fakeDocker({ current: container({ state: running, labels }) });
+  const m = dockerManager(docker, { config });
+  const updated = await m.updateService("hindsight", releases("1.2.0"));
+  assert.equal(updated.success, true, updated.message);
+  assert.deepEqual(docker.calls.find(a => a[0] === "pull"), ["pull", "ghcr.io/vectorize-io/hindsight:1.2.0"]);
+  assert.equal(docker.calls.findLast(a => a[0] === "run").at(-1), "ghcr.io/vectorize-io/hindsight:1.2.0");
+  assert.equal(m.readState().config.hindsight.image, "ghcr.io/vectorize-io/hindsight:1.2.0", "the new tag is saved for later starts");
+
+  for (const [latest, expected] of [["1.1.0", /already up to date/], [null, /Cannot determine the latest Hindsight release/]]) {
+    const idle = fakeDocker({ current: container({ state: running, labels }) });
+    const same = dockerManager(idle, { config });
+    const result = await same.updateService("hindsight", releases(latest));
+    assert.match(result.message, expected);
+    assert.equal(result.success, latest !== null);
+    assert.deepEqual(idle.verbs(), ["version", "container inspect"]);
+    assert.equal(same.readState().config.hindsight.image, config.image);
+  }
+
+  const failing = fakeDocker({ current: container({ state: running, labels }), backupExit: 1 });
+  const unchanged = dockerManager(failing, { config });
+  assert.equal((await unchanged.updateService("hindsight", releases("1.2.0"))).success, false);
+  assert.equal(unchanged.readState().config.hindsight.image, config.image, "a failed update does not move the saved tag");
+});
+
+test("adopt imports a foreign container's settings and recreates it on the same volume", async () => {
+  const foreignContainer = (mounts = [{ Type: "volume", Name: "my-data", Destination: "/home/hindsight/.pg0" }]) => ({
+    ...container({ state: running, labels: { "com.docker.compose.project": "hindsight" } }),
+    Config: { Image: "ghcr.io/vectorize-io/hindsight:1.1.0", Labels: { "com.docker.compose.project": "hindsight" }, Env: [...IMAGE_ENV,
+      "HINDSIGHT_API_LLM_PROVIDER=openai", "HINDSIGHT_API_LLM_MODEL=auto-free", "HINDSIGHT_API_LLM_BASE_URL=https://gateway.example/v1",
+      "HINDSIGHT_API_LLM_API_KEY=sk-adopted", "HINDSIGHT_CP_DATAPLANE_API_URL=http://localhost:8888",
+      "HINDSIGHT_API_LLM_1_API_KEY=sk-second", 'HINDSIGHT_API_LLM_STRATEGY={"mode":"failover","a":"b=c"}'] },
+    Mounts: mounts,
+    HostConfig: { PortBindings: { "8888/tcp": [{ HostIp: "127.0.0.1", HostPort: "18888" }], "9999/tcp": [{ HostIp: "127.0.0.1", HostPort: "19999" }] } },
+  });
+  try {
+    const bound = fakeDocker({ current: foreignContainer([{ Type: "bind", Source: "C:/data", Destination: "/home/hindsight/.pg0" }]) });
+    const refusing = dockerManager(bound);
+    const refused = await refusing.updateService("hindsight", { adopt: true });
+    assert.equal(refused.success, false);
+    assert.match(refused.message, /Cannot adopt container 'hindsight': its data must be in one Docker volume.*Nothing was changed/);
+    assert.deepEqual(bound.verbs(), ["version", "container inspect", "image inspect"]);
+    assert.equal(refusing.readState().config.hindsight, undefined);
+    assert.equal(readHindsightApiKey().key, "sk-secret");
+
+    const docker = fakeDocker({ current: foreignContainer() });
+    const m = dockerManager(docker);
+    const adopted = await m.updateService("hindsight", { adopt: true });
+    assert.equal(adopted.success, true, adopted.message);
+    assert.match(adopted.message, /adopted and recreated by aih \(data volume 'my-data' kept; healthy/);
+    const extra = join(home, "hindsight-extra.env");
+    assert.deepEqual(m.readState().config.hindsight, normalizeHindsightConfig({ image: "ghcr.io/vectorize-io/hindsight:1.1.0", volume: "my-data",
+      apiPort: 18888, uiPort: 19999, llmModel: "auto-free", llmBaseUrl: "https://gateway.example/v1", envFile: extra }));
+    assert.deepEqual(readHindsightApiKey(), { key: "sk-adopted", source: "file" });
+    // Image defaults and the variables aih sets itself are not copied; everything else is, verbatim.
+    assert.equal(await readFile(extra, "utf8"), 'HINDSIGHT_API_LLM_1_API_KEY=sk-second\nHINDSIGHT_API_LLM_STRATEGY={"mode":"failover","a":"b=c"}\n');
+    assert.deepEqual(docker.verbs(), ["version", "container inspect", "image inspect", "stop", "rm", "version", "container inspect", "image inspect", "run", "container inspect"]);
+    const run = docker.calls.find(a => a[0] === "run");
+    for (const expected of ["io.aih.managed=true", "my-data:/home/hindsight/.pg0", "127.0.0.1:18888:8888", "127.0.0.1:19999:9999", extra]) assert.ok(run.includes(expected), expected);
+    assert.ok(!docker.calls.flat().join(" ").includes("sk-"), "no secret on a docker command line");
+    assert.equal(run.at(-1), "ghcr.io/vectorize-io/hindsight:1.1.0", "adoption keeps the image; updating is a separate step");
+    // Once adopted it is an ordinary aih container: the next update no longer asks.
+    assert.notEqual((await m.updateService("hindsight", { getVersions: async () => ({ hindsight: { latestVersion: "1.1.0" } }) })).adoptable, true);
+  } finally {
+    saveHindsightApiKey("sk-secret");
+  }
+});
+
+test("dashboard adopts only on a second consecutive u", async t => {
+  const calls = [];
+  t.mock.method(manager, "updateService", async (id, options) => { calls.push(options.adopt); return { success: false, adoptable: true, message: "press u again" }; });
+  const d = new Dashboard({ getVersions: async () => ({}) });
+  d.refresh = async () => {};
+  d.render = () => {};
+  d.statuses = [{ id: "hindsight", runtime: "docker", status: "running" }];
+  const press = async key => { d.onKey(key); await new Promise(resolve => setImmediate(resolve)); };
+  await press("u");
+  await press("u");
+  await press("u");
+  await press("d");
+  await press("u");
+  assert.deepEqual(calls, [false, true, true, false]);
 });
 
 test("setup shows Hindsight fields only when selected and never renders the key", () => {

@@ -118,7 +118,7 @@ describe("dashboard service versions", () => {
       const updating = dashboard.onKey("u");
       await dashboard.onKey("u");
       expect(update).toHaveBeenCalledTimes(1);
-      expect(update).toHaveBeenCalledWith("ocx");
+      expect(update).toHaveBeenCalledWith("ocx", { adopt: false });
       expect(dashboard.busy).toBe(true);
       expect(stripAnsi(dashboard.status)).toContain("Update ocx");
       finish({ success: true, message: "Updated to 2.49.0" });

@@ -66,12 +66,16 @@ ${bold("HINDSIGHT (DOCKER):")}
   Configure container, ports, LLM provider/model/base URL and API key in status --ui (c),
   after selecting hindsight in the Startup step. The key is kept in ~/.aih/hindsight.env;
   HINDSIGHT_API_LLM_API_KEY from the environment is used when no key is saved.
-  update pulls the image and recreates only containers created by aih.
+  update moves a version tag of the official image to the latest release (other tags are pulled
+  again), archives the data volume in ~/.aih/backups and recreates the container. A container
+  not created by aih (e.g. docker compose) is left alone until adopted: update hindsight --adopt
+  imports its image, ports, volume and environment and recreates it on the same volume.
 
 ${bold("OPTIONS:")}
   ${gray("-n, --lines <num>")}     Number of log lines to show (logs only; default: 50)
   ${gray("-f, --follow")}          Follow log output in real-time (logs only)
   ${gray("--json")}                JSON for status, start/up, restart, update and stats
+  ${gray("--adopt")}               Take over a Hindsight container not created by aih (update only)
   ${gray("--repo")}                Open GitHub repositories instead of dashboards (open only)
   ${gray("--gpt")}                 Start the configured Windows Astra chain (start/up only)
   ${gray("-ui, --ui")}             Open the interactive dashboard (status only, requires a TTY)
@@ -345,12 +349,13 @@ export async function main({ updateSelfImpl = updateSelf } = {}) {
     case "update": {
       const ids = [...new Set(targets)];
       const invalid = ids.filter(id => !SERVICE_IDS.includes(id));
-      const invalidOption = rawArgs.find(arg => arg.startsWith("-") && arg !== "--json");
+      const adopt = rawArgs.includes("--adopt");
+      const invalidOption = rawArgs.find(arg => arg.startsWith("-") && arg !== "--json" && arg !== "--adopt");
       let results;
       // Validate the entire request before updating anything, including the
       // service-first alias (which accepts exactly one service).
       if (invalidOption) {
-        results = [{ id: targets[0] || null, success: false, message: `Unsupported update option '${invalidOption}'. Only --json is supported.` }];
+        results = [{ id: targets[0] || null, success: false, message: `Unsupported update option '${invalidOption}'. Only --json and --adopt are supported.` }];
       } else if (serviceFirstUpdate && positionalArgs.length !== 2) {
         results = [{ id: targets[0], success: false, message: `Usage: ${CLI_NAME} <service> update [--json]; use '${CLI_NAME} update <services...>' for multiple services.` }];
       } else if (invalid.length) {
@@ -364,7 +369,7 @@ export async function main({ updateSelfImpl = updateSelf } = {}) {
           if (!jsonOutput) process.stdout.write(`  Updating ${bold(id)}... `);
           let result;
           try {
-            result = id === CLI_NAME ? await updateSelfImpl() : await manager.updateService(id);
+            result = id === CLI_NAME ? await updateSelfImpl() : await manager.updateService(id, { adopt });
           } catch (err) {
             result = { success: false, message: err?.message || String(err) };
           }

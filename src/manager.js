@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync, statSync, openSync, readSync, closeSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, statSync, openSync, readSync, closeSync, readdirSync, rmSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
@@ -11,6 +11,8 @@ import { installServiceUpdate, serviceStartCommand } from "./service-updates.js"
 import { configureCodexForProxy } from "./codex-routing.js";
 import {
   HINDSIGHT_DEFAULTS,
+  HINDSIGHT_REPOSITORY,
+  adoptedHindsightSettings,
   describeHealth,
   dockerInfo,
   dockerLogged,
@@ -62,8 +64,8 @@ export class ServiceManager {
   }
 
   /** Explicit update: fresh check, stop if needed, install, verify, restore runtime state. */
-  async updateService(serviceId, { getVersions = getServiceVersions, install = installServiceUpdate } = {}) {
-    if (isDocker(serviceId)) return this.updateDockerService(serviceId);
+  async updateService(serviceId, { getVersions = getServiceVersions, install = installServiceUpdate, adopt = false } = {}) {
+    if (isDocker(serviceId)) return this.updateDockerService(serviceId, { getVersions, adopt });
     if (!Object.hasOwn(SERVICE_PACKAGES, serviceId)) {
       return { success: false, message: serviceId === "proxy"
         ? "The built-in proxy is part of ai-helper; update ai-helper itself to update it."
@@ -557,44 +559,128 @@ export class ServiceManager {
     return { success: true, message: `Hindsight container '${config.containerName}' stopped (data kept)` };
   }
 
-  /** Pull, then recreate only containers aih created; other containers belong to their owner. */
-  async updateDockerService(id) {
+  /**
+   * Pull, back up the data, then recreate. Only containers aih created are replaced:
+   * any other container belongs to its owner until the user explicitly adopts it.
+   */
+  async updateDockerService(id, { getVersions = getServiceVersions, adopt = false } = {}) {
     if (this.updatesInProgress.has(id)) return { success: false, message: `An update for '${id}' is already in progress` };
     this.updatesInProgress.add(id);
     try {
       const config = this.hindsightConfig(this.readState(), { strict: true });
+      const name = config.containerName;
       const docker = await dockerInfo(this.runDocker);
       if (!docker.available) return { success: false, message: `Docker is not available (${docker.error}). Start Docker Desktop and retry.` };
-      const container = await inspectContainer(config.containerName, this.runDocker, 10000);
+      const container = await inspectContainer(name, this.runDocker, 10000);
       if (container && !container.managed) {
-        return { success: false, message: `Container '${config.containerName}' was not created by aih${container.composeProject ? ` (docker compose project '${container.composeProject}')` : ""}; update it with the tool that created it, or remove it so aih can create its own.` };
+        if (adopt) return await this.adoptDockerService(id, name, container);
+        return { success: false, adoptable: true, message: `Container '${name}' was not created by aih${container.composeProject ? ` (docker compose project '${container.composeProject}')` : ""}. To adopt it run 'aih update ${id} --adopt' (dashboard: press u again): aih imports its settings and recreates it on the same data volume.` };
       }
       const previousVersion = container?.running ? (await this.probeHealth(hindsightUrls(config).api)).version ?? null : null;
-      const pulled = await dockerLogged(id, ["pull", config.image], this.runDocker, 30 * 60000);
-      if (pulled.exitCode !== 0) return { success: false, previousVersion, message: `docker pull ${config.image} failed: ${dockerError(pulled)}` };
-      if (!container) return { success: true, updated: true, previousVersion, message: `Image ${config.image} pulled; the container is created on the next start` };
-      const pulledImage = await imageId(config.image, this.runDocker);
-      if (pulledImage && pulledImage === container.imageId) {
-        return { success: true, updated: false, alreadyUpToDate: true, previousVersion, version: previousVersion,
-          message: `'${id}' already uses the latest ${config.image}` };
+      // A release tag of the official image moves to the latest GitHub release; any other tag is pulled again.
+      const tag = config.image.startsWith(HINDSIGHT_REPOSITORY + ":") ? config.image.slice(HINDSIGHT_REPOSITORY.length + 1) : "";
+      let image = config.image;
+      if (compareVersions(tag, tag) !== null) {
+        const latest = (await getVersions([{ id }]))[id]?.latestVersion;
+        const comparison = compareVersions(tag, latest);
+        if (comparison === null) return { success: false, previousVersion, message: "Cannot determine the latest Hindsight release; no changes made. Check your connection and retry." };
+        if (comparison >= 0) {
+          return { success: true, updated: false, alreadyUpToDate: true, previousVersion, version: previousVersion,
+            message: `'${id}' is already up to date (${config.image})` };
+        }
+        image = HINDSIGHT_REPOSITORY + ":" + latest;
       }
-      const removed = await dockerLogged(id, ["rm", "-f", config.containerName], this.runDocker, 120000);
-      if (removed.exitCode !== 0) return { success: false, previousVersion, message: `Cannot replace the container: ${dockerError(removed)}` };
+      const pulled = await dockerLogged(id, ["pull", image], this.runDocker, 30 * 60000);
+      if (pulled.exitCode !== 0) return { success: false, previousVersion, message: `docker pull ${image} failed: ${dockerError(pulled)}` };
+      const saveImage = () => { if (image !== config.image) this.saveHindsightConfiguration({ config: { ...config, image } }); };
+      if (!container) {
+        saveImage();
+        return { success: true, updated: true, previousVersion, message: `Image ${image} pulled; the container is created on the next start` };
+      }
+      const pulledImage = await imageId(image, this.runDocker);
+      if (image === config.image && pulledImage && pulledImage === container.imageId) {
+        return { success: true, updated: false, alreadyUpToDate: true, previousVersion, version: previousVersion,
+          message: `'${id}' already uses the latest ${image}` };
+      }
+      // Stop first: the archive needs a quiet database, and 'rm -f' would SIGKILL it.
+      const stopped = await dockerLogged(id, ["stop", name], this.runDocker, 60000);
+      const backup = stopped.exitCode === 0 ? await this.backupHindsightVolume(id, config.volume, container.imageId)
+        : { success: false, message: dockerError(stopped) };
+      const removed = backup.success ? await dockerLogged(id, ["rm", name], this.runDocker, 60000) : null;
+      if (removed?.exitCode !== 0) {
+        if (container.running) await dockerLogged(id, ["start", name], this.runDocker, 120000);
+        await this.syncState();
+        return { success: false, previousVersion, message: (backup.success ? `Cannot replace the container: ${dockerError(removed)}`
+          : `Data backup failed: ${backup.message}`) + "; the current container is kept" };
+      }
+      saveImage();
       if (!container.running) {
         await this.syncState();
-        return { success: true, updated: true, restarted: false, previousVersion,
-          message: `Image ${config.image} updated; the container is recreated on the next start (data volume kept)` };
+        return { success: true, updated: true, restarted: false, previousVersion, backup: backup.path,
+          message: `Image ${image} updated; the container is recreated on the next start (data backup: ${backup.path})` };
       }
       const started = await this.startDockerService(id);
       const version = started.health?.version ?? null;
-      return { ...started, updated: true, restarted: started.success, previousVersion, version,
-        message: started.success ? `'${id}' updated${previousVersion && version ? ` from ${previousVersion} to ${version}` : ""} and restarted`
-          : `Image updated, but restart failed: ${started.message}` };
+      return { ...started, updated: true, restarted: started.success, previousVersion, version, backup: backup.path,
+        message: (started.success ? `'${id}' updated${previousVersion && version ? ` from ${previousVersion} to ${version}` : ""} and restarted`
+          : `Image updated, but restart failed: ${started.message}`) + ` (data backup: ${backup.path})` };
     } catch (error) {
       return { success: false, message: `Update failed: ${error.message}` };
     } finally {
       this.updatesInProgress.delete(id);
     }
+  }
+
+  /** Archives a stopped container's data volume in ~/.aih/backups, keeping the two most recent archives. */
+  async backupHindsightVolume(id, volume, image) {
+    const dir = join(getAihDir(), "backups");
+    ensureDir(dir);
+    const file = `hindsight-${new Date().toISOString().replace(/[-:]|\..*/g, "")}.tgz`;
+    // The container's own image already has tar: nothing else to pull. Root, so the archive is writable on Linux.
+    const result = await dockerLogged(id, ["run", "--rm", "--user", "0", "--entrypoint", "tar", "-v", volume + ":/d:ro", "-v", dir + ":/b",
+      image, "czf", "/b/" + file, "-C", "/d", "."], this.runDocker, 30 * 60000);
+    if (result.exitCode !== 0) {
+      rmSync(join(dir, file), { force: true });
+      return { success: false, message: dockerError(result) };
+    }
+    for (const old of readdirSync(dir).filter(f => /^hindsight-.*\.tgz$/.test(f)).sort().slice(0, -2)) rmSync(join(dir, old), { force: true });
+    return { success: true, path: join(dir, file) };
+  }
+
+  /** Takes over a container aih did not create: imports its settings, then recreates it on the same volume. */
+  async adoptDockerService(id, name, container) {
+    const refuse = reason => ({ success: false, message: `Cannot adopt container '${name}': ${reason}. Nothing was changed.` });
+    // Variables already defined by the image are not settings: importing them would pin them across updates.
+    const imageEnv = await this.runDocker("docker", ["image", "inspect", "--format", "{{json .Config.Env}}", container.imageId], 10000);
+    if (imageEnv.exitCode !== 0) return refuse(dockerError(imageEnv));
+    let adopted;
+    try { adopted = adoptedHindsightSettings(name, container, JSON.parse(imageEnv.stdout) || []); }
+    catch (error) { return refuse(error.message); }
+    if (!adopted.key && !readHindsightApiKey().key && requiresApiKey(adopted.config)) {
+      return refuse(`it has no LLM API key for provider '${adopted.config.llmProvider}'; save one in setup (c) first`);
+    }
+    const envFile = adopted.extra.length ? join(getAihDir(), "hindsight-extra.env") : "";
+    if (envFile) {
+      ensureDir(getAihDir());
+      writeFileSync(envFile, adopted.extra.join("\n") + "\n", { encoding: "utf8", mode: 0o600 });
+    }
+    this.saveHindsightConfiguration({ config: { ...adopted.config, envFile }, apiKey: adopted.key });
+    const stopped = await dockerLogged(id, ["stop", name], this.runDocker, 60000);
+    const removed = stopped.exitCode === 0 ? await dockerLogged(id, ["rm", name], this.runDocker, 60000) : stopped;
+    if (removed.exitCode !== 0) {
+      if (container.running) await dockerLogged(id, ["start", name], this.runDocker, 120000);
+      await this.syncState();
+      return { success: false, message: `Settings imported, but the container could not be replaced: ${dockerError(removed)}` };
+    }
+    const kept = `data volume '${adopted.config.volume}' kept`;
+    if (!container.running) {
+      await this.syncState();
+      return { success: true, adopted: true, message: `Container '${name}' adopted; aih recreates it on the next start (${kept})` };
+    }
+    const started = await this.startDockerService(id);
+    return { ...started, adopted: true, message: started.success
+      ? `Container '${name}' adopted and recreated by aih (${kept}; ${describeHealth(started.health)}). Update it with u or 'aih update ${id}'.`
+      : `Settings imported and old container removed, but the new one failed: ${started.message}` };
   }
 
   /** Non-secret settings go to state.json; the key only to ~/.aih/hindsight.env. */
@@ -618,7 +704,7 @@ export class ServiceManager {
     catch (error) { return { success: true, warning: true, message: `Hindsight settings saved; Docker not available (${error.message})` }; }
     if (!container?.running) return { success: true, message: "Hindsight settings saved for its next start" };
     if (!container.managed) {
-      return { success: true, warning: true, message: `Hindsight settings saved; container '${config.containerName}' was not created by aih and is left unchanged` };
+      return { success: true, warning: true, message: `Hindsight settings saved; container '${config.containerName}' was not created by aih and is left unchanged (adopt it with u on the dashboard)` };
     }
     if (container.configHash === hindsightConfigHash(config, readHindsightApiKey().key)) return { success: true, message: "Hindsight unchanged" };
     const stopped = await this.stopDockerService("hindsight");
