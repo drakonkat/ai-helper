@@ -10,18 +10,18 @@ import { createPresetHooks } from "../src/proxy-presets.js";
 import { patchPxpipeSource, patchPxpipeHistorySource } from "../scripts/patch-pxpipe.js";
 import { transformOpenAIResponses } from "pxpipe-proxy";
 
-async function poolFixture(t, limit = 1024) {
+async function poolFixture(t, limit = 1024, options = {}) {
   const dir = await mkdtemp(join(tmpdir(), "aih-pxpipe-"));
   assert.equal(dirname(resolve(dir)), resolve(tmpdir()));
   const file = join(dir, "worker.mjs");
-  await writeFile(file, `import { parentPort } from 'node:worker_threads';
+  await writeFile(file, `import { parentPort, threadId } from 'node:worker_threads';
     import { performance } from 'node:perf_hooks';
     parentPort.on('message', ({id, duration = 0, crash = false}) => {
       if (crash) process.exit(1);
       const start = performance.now(); while (performance.now() - start < duration) {}
-      parentPort.postMessage({id, stage: {}, timings: {pxpipeMs: performance.now() - start}});
+      parentPort.postMessage({id, stage: {worker: threadId}, timings: {pxpipeMs: performance.now() - start}});
     }); parentPort.postMessage({ready: true});`);
-  const pool = createPxpipePool(limit, pathToFileURL(file));
+  const pool = createPxpipePool(limit, pathToFileURL(file), options);
   t.after(async () => { await pool.close(); await rm(dir, { recursive: true, force: true }); });
   await Promise.all([pool.run({body: new Uint8Array(1)}, {sessionId: "A"}), pool.run({body: new Uint8Array(1)}, {sessionId: "B"})]);
   return pool;
@@ -50,13 +50,13 @@ test("CPU workers leave excluded models and the main event loop responsive", { t
 });
 
 test("bounded queue, active/queued cancellation, crash recovery and close settle every job", { timeout: 10000 }, async t => {
-  const pool = await poolFixture(t, 16);
+  const pool = await poolFixture(t, 16, { maxQueuedPerLane: 2, maxQueuedBytes: 16 });
   const active = new AbortController(), queued = new AbortController();
-  const first = pool.run({body: new Uint8Array(8), duration: 5000}, {sessionId: "A", signal: active.signal});
+  const first = pool.run({body: new Uint8Array(8), duration: 300}, {sessionId: "A", signal: active.signal});
   const second = pool.run({body: new Uint8Array(8)}, {sessionId: "A", signal: queued.signal});
   const third = pool.run({body: new Uint8Array(8)}, {sessionId: "A"});
   const settled = Promise.allSettled([first, second, third]);
-  await assert.rejects(pool.run({body: new Uint8Array(1)}, {sessionId: "A"}), {statusCode: 503});
+  await assert.rejects(pool.run({body: new Uint8Array(1)}, {sessionId: "A"}), {code: "PXPIPE_BUSY", reason: "queue_full"});
   queued.abort(); active.abort();
   const results = await settled;
   assert.equal(results[0].reason.name, "AbortError");
@@ -68,6 +68,51 @@ test("bounded queue, active/queued cancellation, crash recovery and close settle
   const rejected = assert.rejects(shutdown, /closed/);
   await Promise.all([pool.close(), pool.close(), rejected]);
   await assert.rejects(pool.run({body: new Uint8Array(1)}), /closed/);
+});
+
+test("aborting the active job keeps its warm worker; a watchdog replaces a stuck one", { timeout: 10000 }, async t => {
+  const pool = await poolFixture(t, 1024, { abandonedJobMs: 300 });
+  const { worker } = (await pool.run({body: new Uint8Array(1)}, {threadId: "A"})).stage;
+  const active = new AbortController();
+  const abandoned = pool.run({body: new Uint8Array(1), duration: 100}, {threadId: "A", signal: active.signal});
+  active.abort();
+  await assert.rejects(abandoned, {name: "AbortError"});
+  assert.equal((await pool.run({body: new Uint8Array(1)}, {threadId: "A"})).stage.worker, worker, "Abort must not restart the worker");
+  const stuck = new AbortController();
+  const hung = pool.run({body: new Uint8Array(1), duration: 5000}, {threadId: "A", signal: stuck.signal});
+  stuck.abort();
+  await assert.rejects(hung, {name: "AbortError"});
+  const started = performance.now();
+  assert.notEqual((await pool.run({body: new Uint8Array(1)}, {threadId: "A"})).stage.worker, worker);
+  assert.ok(performance.now() - started < 3000, "The watchdog must not wait for the abandoned job");
+});
+
+test("queue wait is bounded and forked threads do not queue behind their parent", { timeout: 10000 }, async t => {
+  // The wait limit also covers cold worker startup in the fixture.
+  const pool = await poolFixture(t, 1024, { maxQueueWaitMs: 1000 });
+  const parent = pool.run({body: new Uint8Array(1), duration: 2000}, {threadId: "A", sessionId: "A"});
+  await assert.rejects(pool.run({body: new Uint8Array(1)}, {threadId: "A", sessionId: "A"}), {code: "PXPIPE_BUSY", reason: "queue_timeout"});
+  const fork = await pool.run({body: new Uint8Array(1)}, {threadId: "fork", sessionId: "A"});
+  assert.notEqual(fork.stage.worker, (await parent).stage.worker);
+});
+
+test("a saturated pxpipe lane forwards requests unchanged instead of failing them", { timeout: 15000 }, async t => {
+  const events = [];
+  const hooks = await createPresetHooks({preset: "pxpipe", models: "gpt-6-astra", maxBodyBytes: 1024 * 1024}, event => events.push(event));
+  t.after(() => hooks.close());
+  const headers = {"content-type": "application/json", "x-codex-turn-metadata": JSON.stringify({session_id: "S", thread_id: "T"})};
+  const request = body => ({method: "POST", path: "/v1/responses", headers: {...headers}, body: Buffer.from(JSON.stringify(body))});
+  // A non-leading model is parsed and rejected by the pool; a leading one is skipped before parsing.
+  const queued = Array.from({length: 5}, () => request({input: "hello", model: "gpt-6-astra"}));
+  const leading = request({model: "gpt-6-astra", input: "hello"});
+  const contexts = [...queued, leading];
+  const raws = contexts.map(context => context.body);
+  await Promise.all(contexts.map(context => hooks.onRequest(context)));
+  assert.equal(events.filter(event => event.error).length, 0);
+  assert.equal(events.filter(event => event.stages[0].reason === "queue_full").length, 2);
+  assert.strictEqual(queued[4].body, raws[4]);
+  assert.strictEqual(leading.body, raws[5]);
+  assert.equal(events.find(event => event.stages[0].reason === "queue_full").threadId, "T");
 });
 
 test("diagnostic patch is version-guarded, idempotent and preserves transformed bytes", { timeout: 10000 }, async t => {

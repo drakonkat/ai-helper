@@ -10,6 +10,28 @@ import { createPxpipePool } from "./pxpipe-pool.js";
 export const PRESETS = Object.freeze(["none", "pxpipe", "headroom", "rtk", "headroom-pxpipe", "rtk-pxpipe", "rtk-headroom-pxpipe"]);
 const DECODERS = { gzip: promisify(zlib.gunzip), deflate: promisify(zlib.inflate), br: promisify(zlib.brotliDecompress),
   ...(typeof zlib.zstdDecompress === "function" ? { zstd: promisify(zlib.zstdDecompress) } : {}) };
+// Safety net, not load control: bodies this large would occupy a worker for minutes.
+export const PXPIPE_MAX_INPUT_BYTES = 64 * 1024 * 1024;
+
+const requestFormat = path => {
+  const pathname = new URL(path, "http://localhost").pathname;
+  return /\/(?:v1\/|anthropic\/)?messages$/.test(pathname) ? "anthropic"
+    : /\/chat\/completions$/.test(pathname) ? "chat" : /\/responses$/.test(pathname) ? "responses" : null;
+};
+
+function turnMetadata(headers) {
+  try {
+    const metadata = JSON.parse(headers?.["x-codex-turn-metadata"] || "{}");
+    return metadata && typeof metadata === "object" ? metadata : {};
+  } catch { return {}; }
+}
+
+const text = value => typeof value === "string" && value.length ? value.slice(0, 128) : undefined;
+const affinityOf = context => {
+  const metadata = turnMetadata(context.headers);
+  return { threadId: text(metadata.thread_id), sessionId: text(metadata.session_id) };
+};
+const skippedPxpipe = reason => tokenStage("pxpipe", 0, 0, false, reason, "not_measured");
 
 export function normalizePresetOptions(options) {
   const preset = options.preset || "none";
@@ -88,8 +110,43 @@ export async function createPresetHooks(config, onStats = () => {}) {
   const px = config.preset.includes("pxpipe") ? await import("pxpipe-proxy/applicability") : null;
   const pool = px ? createPxpipePool(config.maxBodyBytes) : null;
   const models = config.models?.split(",");
+  const listed = model => models.some(m => m.endsWith("*") ? model.startsWith(m.slice(0, -1)) : model === m);
+  const pxpipeModel = model => models ? listed(model) : px.isPxpipeSupportedModel(model) || px.isPxpipeSupportedGptModel(model);
   const wsModels = new WeakMap();
   const warnedEncodings = new Set();
+
+  function record(context, websocket, started, { model, changed, stages, error, timings = {} }) {
+    // Observability must never interrupt proxy traffic; no request bodies are passed to the recorder.
+    // Optional correlation only; never pass headers or bodies to the recorder.
+    const requestId = typeof context.headers?.["x-request-id"] === "string" ? context.headers["x-request-id"].slice(0, 128) : undefined;
+    let source = {};
+    try {
+      const metadata = turnMetadata(context.headers);
+      const remotes = Object.values(metadata.workspaces || {}).flatMap(workspace => Object.values(workspace?.associated_remote_urls || {}));
+      const project = remotes.filter(value => typeof value === "string").map(value => value.replace(/^[^@/]+@[^:/]+:/, "")
+        .replace(/^[a-z]+:\/\/[^/]+/i, "").split(/[?#]/)[0].replace(/\.git$/i, "").split("/").filter(Boolean).slice(-2).join("/")).find(Boolean);
+      source = Object.fromEntries(Object.entries({ sessionId: text(metadata.session_id), threadId: text(metadata.thread_id), project: text(project) })
+        .filter(([, value]) => value !== undefined));
+    } catch {}
+    try {
+      const update = onStats({ model, preset: config.preset, transport: websocket ? "WS" : "HTTP", changed, stages, error,
+        timings: { presetMs: Math.round((performance.now() - started) * 10) / 10, ...timings },
+        ...source, ...(requestId ? { requestId } : {}) });
+      // ponytail: WS measures presets only; response timings need per-response-ID correlation.
+      if (!websocket && typeof update === "function") context.updateTiming = update;
+    } catch {}
+  }
+
+  // pxpipe-only HTTP: decide a capacity/size skip before parsing a multi-MB JSON body.
+  function skipBeforeParse(raw, context, started) {
+    if (!requestFormat(context.path)) return false;
+    // Only a leading top-level model is trusted; anything else takes the normal path.
+    const model = /^\s*\{\s*"model"\s*:\s*"([^"\\]{1,128})"/.exec(raw.subarray(0, 512).toString("latin1"))?.[1];
+    if (!model || !pxpipeModel(model)) return false;
+    const reason = raw.length > PXPIPE_MAX_INPUT_BYTES ? "body_too_large" : pool.full(affinityOf(context), raw.length) ? "queue_full" : null;
+    if (reason) record(context, false, started, { model, changed: false, stages: [skippedPxpipe(reason)], error: false });
+    return Boolean(reason);
+  }
 
   async function headroom(body, model) {
     // Responses items (reasoning, calls, IDs, images) stay native. Compress only their tool text.
@@ -123,9 +180,7 @@ export async function createPresetHooks(config, onStats = () => {}) {
   }
 
   async function transform(raw, context, websocket = false, started = performance.now()) {
-    const path = new URL(context.path, "http://localhost").pathname;
-    const format = /\/(?:v1\/|anthropic\/)?messages$/.test(path) ? "anthropic"
-      : /\/chat\/completions$/.test(path) ? "chat" : /\/responses$/.test(path) ? "responses" : null;
+    const format = requestFormat(context.path);
     if (!format) return raw;
     let envelope;
     try { envelope = JSON.parse(raw.toString("utf8")); } catch { return raw; }
@@ -142,29 +197,9 @@ export async function createPresetHooks(config, onStats = () => {}) {
     let changed = false;
     const stages = [];
     let pxpipeTimings = {};
-    const report = error => {
-      // Observability must never interrupt proxy traffic; no request bodies are passed to the recorder.
-      // Optional correlation only; never pass headers or bodies to the recorder.
-      const requestId = typeof context.headers?.["x-request-id"] === "string" ? context.headers["x-request-id"].slice(0, 128) : undefined;
-      let source = {};
-      try {
-        const metadata = JSON.parse(context.headers?.["x-codex-turn-metadata"] || "{}");
-        const remotes = Object.values(metadata.workspaces || {}).flatMap(workspace => Object.values(workspace?.associated_remote_urls || {}));
-        const project = remotes.filter(value => typeof value === "string").map(value => value.replace(/^[^@/]+@[^:/]+:/, "")
-          .replace(/^[a-z]+:\/\/[^/]+/i, "").split(/[?#]/)[0].replace(/\.git$/i, "").split("/").filter(Boolean).slice(-2).join("/")).find(Boolean);
-        source = Object.fromEntries(Object.entries({ sessionId: metadata.session_id, threadId: metadata.thread_id, project })
-          .filter(([, value]) => typeof value === "string" && value.length).map(([key, value]) => [key, value.slice(0, 128)]));
-      } catch {}
-      try {
-        const update = onStats({ model, preset: config.preset, transport: websocket ? "WS" : "HTTP", changed, stages, error,
-          timings: { presetMs: Math.round((performance.now() - started) * 10) / 10, ...pxpipeTimings },
-          ...source, ...(requestId ? { requestId } : {}) });
-        // ponytail: WS measures presets only; response timings need per-response-ID correlation.
-        if (!websocket && typeof update === "function") context.updateTiming = update;
-      } catch {}
-    };
+    const report = error => record(context, websocket, started, { model, changed, stages, error, timings: pxpipeTimings });
     // Preserve observability and byte-for-byte forwarding for excluded models.
-    if (models && !models.some(m => m.endsWith("*") ? model.startsWith(m.slice(0, -1)) : model === m)) {
+    if (models && !listed(model)) {
       for (const stage of config.preset.split("-")) stages.push(tokenStage(stage, 0, 0, false, "model_excluded", "not_measured"));
       report(false);
       return raw;
@@ -192,15 +227,26 @@ export async function createPresetHooks(config, onStats = () => {}) {
         // A Headroom no-op must not discard changes already made by RTK.
         changed = JSON.stringify(body) !== before || changed;
       }
+      let result;
       if (bypassPxpipe) {
         stages.push(tokenStage("pxpipe", 0, 0, false, "native_images_present", "pxpipe_estimate"));
-      } else if (px && (models ? models.some(m => m.endsWith("*") ? model.startsWith(m.slice(0, -1)) : model === m) : px.isPxpipeSupportedModel(model) || px.isPxpipeSupportedGptModel(model))) {
-        const bytes = Buffer.from(JSON.stringify({ ...body, model }));
-        let sessionId;
-        try { sessionId = JSON.parse(context.headers?.["x-codex-turn-metadata"] || "{}").session_id; } catch {}
-        const result = await pool.run({ body: bytes, format, model }, {
-          sessionId: typeof sessionId === "string" ? sessionId : undefined, signal: context.signal,
-        });
+      } else if (px && pxpipeModel(model) && raw.length > PXPIPE_MAX_INPUT_BYTES) {
+        stages.push(skippedPxpipe("body_too_large"));
+      } else if (px && pxpipeModel(model)) {
+        // An unchanged HTTP body already carries the model: skip a second multi-MB serialization.
+        const reuse = !changed && body === envelope && body.model === model;
+        const bytes = reuse ? raw : Buffer.from(JSON.stringify({ ...body, model }));
+        try {
+          result = await pool.run({ body: bytes, format, model }, { ...affinityOf(context), signal: context.signal, transfer: !reuse });
+        } catch (error) {
+          if (error.code !== "PXPIPE_BUSY") throw error;
+          // Availability over savings: forward without pxpipe instead of a 503 the client retries at once.
+          stages.push(skippedPxpipe(error.reason));
+        }
+      } else if (px) {
+        stages.push(tokenStage("pxpipe", 0, 0, false, "model_excluded", "pxpipe_estimate"));
+      }
+      if (result) {
         pxpipeTimings = Object.fromEntries(Object.entries(result.timings).map(([key, value]) => [key, Math.round(value * 10) / 10]));
         stages.push(result.stage);
         if (result.stage.applied) {
@@ -211,8 +257,6 @@ export async function createPresetHooks(config, onStats = () => {}) {
           else { for (const key of Object.keys(body)) delete body[key]; Object.assign(body, transformed); }
           changed = true;
         }
-      } else if (px) {
-        stages.push(tokenStage("pxpipe", 0, 0, false, "model_excluded", "pxpipe_estimate"));
       }
       const output = changed ? Buffer.from(JSON.stringify(envelope)) : raw;
       report(false);
@@ -233,7 +277,17 @@ export async function createPresetHooks(config, onStats = () => {}) {
         }
         return;
       }
-      const raw = encoding === "identity" ? context.body : await DECODERS[encoding](context.body, { maxOutputLength: config.maxBodyBytes });
+      let raw = context.body;
+      if (encoding !== "identity") {
+        try { raw = await DECODERS[encoding](context.body, { maxOutputLength: config.maxBodyBytes }); }
+        catch (error) {
+          if (error.code !== "ERR_BUFFER_TOO_LARGE") throw error;
+          // Too large to inspect: forward the compressed bytes unchanged instead of failing the request.
+          console.warn(`[aih preset] Skipped presets: decompressed ${encoding} body exceeds maxBodyBytes`);
+          return;
+        }
+      }
+      if (config.preset === "pxpipe" && skipBeforeParse(raw, context, started)) return;
       const body = await transform(raw, context, false, started);
       if (body !== raw) {
         context.body = body;

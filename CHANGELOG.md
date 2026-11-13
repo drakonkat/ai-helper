@@ -4,6 +4,15 @@ All notable changes to **`ai-helper` (`aih`)** are documented in this file.
 
 ---
 
+## [1.2.20] - 2026-11-13
+
+### Changed
+- **pxpipe overload no longer fails requests**: when the worker queue is full, a request waits more than 10 s, or the body exceeds 64 MiB, the proxy forwards it without pxpipe (stage reason `queue_full`, `queue_timeout`, `body_too_large`) instead of answering HTTP 503. pxpipe-only requests are checked before the JSON body is parsed.
+- The worker queue is limited per worker (4 waiting requests) and by waiting time; the byte cap is now a memory guard of 4 × `--max-body-bytes` instead of a single request's size.
+- Worker affinity follows the Codex thread instead of the session, so forked subagents no longer queue behind their parent and each other.
+- A client disconnect no longer terminates the active pxpipe worker: its result is discarded and the warm worker is kept (replaced only if still busy after 120 s).
+- Compressed requests that decompress beyond `--max-body-bytes` are forwarded unchanged instead of failing; unchanged bodies are no longer re-serialized before pxpipe.
+
 ## [1.2.19] - 2026-11-10
 
 ### Added

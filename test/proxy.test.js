@@ -311,7 +311,12 @@ test("Zstandard requests produce stats for Astra/AGY and preserve bytes when exc
   }
   const limited = await createPresetHooks({ ...config, maxBodyBytes: 32 });
   t.after(() => limited.close());
-  await assert.rejects(limited.onRequest({ method: "POST", path: "/v1/responses", headers: { "content-type": "application/json", "content-encoding": "zstd" }, body: zlib.zstdCompressSync(Buffer.alloc(1024)) }));
+  // Too large to decompress: forwarded as received instead of failing the request.
+  const oversized = { method: "POST", path: "/v1/responses", headers: { "content-type": "application/json", "content-encoding": "zstd" }, body: zlib.zstdCompressSync(Buffer.alloc(1024)) };
+  const compressed = oversized.body;
+  await limited.onRequest(oversized);
+  assert.strictEqual(oversized.body, compressed);
+  assert.equal(oversized.headers["content-encoding"], "zstd");
 });
 
 test("Headroom runs before real pxpipe over HTTP and WS, then the custom interceptor", { timeout: 15000 }, async t => {

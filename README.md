@@ -466,10 +466,17 @@ tokenization costs and worker-thread experiments.
 
 Pxpipe transformations and their token estimates run in up to **two persistent
 CPU workers**. Excluded models bypass the worker queue; HTTP and SSE streaming
-remain on the main thread. Sessions have stable worker affinity to reuse caches.
-The queue is limited to 32 waiting requests and `--max-body-bytes` of waiting
-input; overload returns HTTP 503. Disconnecting cancels queued work or terminates
-and replaces the active worker. Shutdown closes both workers.
+remain on the main thread. Each Codex thread keeps a stable worker to reuse caches;
+a new thread (for example a forked subagent) starts on its parent's worker only when
+that worker is idle, otherwise on the least busy one. Each worker accepts up to 4
+waiting requests, each waiting at most 10 s, and all waiting input is capped at
+4 × `--max-body-bytes`. Requests over these limits, or with bodies over 64 MiB, are
+**forwarded without pxpipe** (stage reason `queue_full`, `queue_timeout` or
+`body_too_large`) instead of failing; pxpipe-only requests are checked before
+parsing. Compressed bodies that decompress beyond `--max-body-bytes` are forwarded
+unchanged. Disconnecting cancels queued work; an active transformation finishes on
+its warm worker and its result is discarded (a worker still busy after 120 s is
+replaced). Shutdown closes both workers.
 
 Installation applies a version-checked correction to pxpipe 0.14.0: diagnostic
 composition counts exclude encrypted reasoning, opaque compaction and media data,
