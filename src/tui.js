@@ -565,7 +565,9 @@ export class Dashboard {
     const rows = this.statuses.map((s, idx) => {
       const active = idx === this.selected;
       const version = this.versions[s.id];
-      const update = version?.updateAvailable === true
+      const update = version?.pinned
+        ? dim("pinned")
+        : version?.updateAvailable === true
         ? yellow(bold(`↑ ${version.latestVersion}`))
         : version?.updateAvailable === false
           ? green("up to date")

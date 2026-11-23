@@ -4,6 +4,16 @@ All notable changes to **`ai-helper` (`aih`)** are documented in this file.
 
 ---
 
+## [1.2.21] - 2026-11-23
+
+### Added
+- **Local LLM for Hindsight** (`hindsight-llm`): an optional llama.cpp server container managed by aih, configured in setup (step *Hindsight local LLM*): image, models folder, model, LoRA adapter, alias, GPUs, context, parallel slots, extra arguments, and the Hindsight operations sent to it (reflect, retain, consolidation, mental model refresh). Both containers share the `aih-hindsight` network. `start hindsight` starts the LLM first and waits for its `/health` and, for a new container, a test completion; `stop hindsight` stops it after Hindsight. It has its own dashboard row with llama.cpp health and build.
+- Adopting Hindsight also imports the local LLM container its operations call, so a docker compose stack becomes `hindsight` + `hindsight-llm` in one step. Adoption now archives the data volume first.
+
+### Changed
+- The llama.cpp build is pinned: `aih update hindsight-llm` pulls the same tag again and rolls back to the previous image if the new one fails; the tag is changed by hand in setup.
+- `aih start hindsight` refuses to start while a container not created by aih runs on the same data volume; `u` offers to adopt it.
+
 ## [1.2.20] - 2026-11-13
 
 ### Changed

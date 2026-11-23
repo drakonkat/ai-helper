@@ -3,7 +3,7 @@ import { readFile, realpath } from "node:fs/promises";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { baseUrl, fetchJson } from "./metrics.js";
 import { SERVICE_PACKAGES as PACKAGES, SERVICES } from "../config.js";
-import { HINDSIGHT_RELEASES_URL } from "../hindsight.js";
+import { HINDSIGHT_RELEASES_URL, LOCAL_LLM_ID } from "../hindsight.js";
 import { refreshToolPath } from "./tool-path.js";
 
 function parseVersion(value) {
@@ -143,6 +143,13 @@ export async function getServiceVersions(statuses, {
   const readCommands = () => commands ||= Promise.resolve().then(() => processCommands(services)).catch(() => ({}));
   // Docker images: the running API reports its version; releases come from GitHub.
   const dockerVersions = docker.map(async status => {
+    // The llama.cpp build is pinned and changed by hand: report it, never offer an update.
+    if (status.id === LOCAL_LLM_ID) {
+      const version = status.status === "running" && baseUrl(status.apiUrl)
+        ? await request(`${baseUrl(status.apiUrl)}/props`, 2000).then(data => typeof data?.build_info === "string" ? data.build_info.split("-")[0] : null).catch(() => null)
+        : null;
+      return [status.id, { version, latestVersion: null, updateAvailable: null, pinned: true }];
+    }
     const [version, latestVersion] = await Promise.all([
       status.status === "running" && baseUrl(status.apiUrl)
         ? request(`${baseUrl(status.apiUrl)}/health/live`, 2000).then(data => cleanVersion(data?.version)).catch(() => null)

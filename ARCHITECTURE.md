@@ -99,6 +99,15 @@ the environment it adds to its image become aih's settings, and aih recreates it
 Update stops the container, archives its volume to `~/.aih/backups` and only then
 removes it; it never uses `docker rm -f`, which would SIGKILL the embedded database.
 
+The optional local LLM (`hindsight-llm`, a llama.cpp server) is part of the Hindsight
+settings (`state.config.hindsight.localLlm`) and is listed as a service only while enabled.
+Both containers join the `aih-hindsight` network. Its container carries `io.aih.role=llm`
+and its own fingerprint (server settings only); the routing settings (operations,
+timeouts, budgets) are part of Hindsight's fingerprint, so changing them recreates
+Hindsight but not the model server. Without a local LLM, Hindsight's fingerprint is
+computed as before, so upgrading aih does not recreate it. Start order is LLM then
+Hindsight, stop order the reverse. aih never advances its image tag.
+
 ---
 
 ## 4. State Synchronization

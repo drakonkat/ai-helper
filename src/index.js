@@ -70,6 +70,8 @@ ${bold("HINDSIGHT (DOCKER):")}
   again), archives the data volume in ~/.aih/backups and recreates the container. A container
   not created by aih (e.g. docker compose) is left alone until adopted: update hindsight --adopt
   imports its image, ports, volume and environment and recreates it on the same volume.
+  Optional local LLM (hindsight-llm, llama.cpp server): enable it in status --ui (c); start/stop
+  hindsight also start it first and stop it last. Its image tag is pinned: update re-pulls it only.
 
 ${bold("OPTIONS:")}
   ${gray("-n, --lines <num>")}     Number of log lines to show (logs only; default: 50)

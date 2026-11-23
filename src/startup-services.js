@@ -1,7 +1,8 @@
 import { SERVICE_IDS } from "./config.js";
 
 export const STARTUP_SERVICE_IDS = Object.freeze([
-  "ocx", "hindsight", ...SERVICE_IDS.filter(id => !["ocx", "hindsight"].includes(id)), "proxy",
+  // hindsight-llm is started and stopped together with hindsight.
+  "ocx", "hindsight", ...SERVICE_IDS.filter(id => !["ocx", "hindsight", "hindsight-llm"].includes(id)), "proxy",
 ]);
 export const DEFAULT_START_SERVICES = Object.freeze(["ocx", "hindsight", "proxy"]);
 /** Saved selections from older releases name services that were replaced. */

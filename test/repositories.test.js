@@ -9,6 +9,7 @@ const repositoryUrls = {
   ocx: "https://github.com/lidge-jun/opencodex",
   hindsight: "https://github.com/vectorize-io/hindsight",
   headroom: "https://github.com/headroomlabs-ai/headroom",
+  "hindsight-llm": "https://github.com/ggml-org/llama.cpp",
   proxy: "https://github.com/drakonkat/ai-helper",
 };
 const services = Object.entries(repositoryUrls).map(([id, repositoryUrl]) => ({

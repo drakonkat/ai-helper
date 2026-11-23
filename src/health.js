@@ -1,5 +1,5 @@
 import { baseUrl } from "./utils/metrics.js";
-import { probeHindsightHealth } from "./hindsight.js";
+import { LOCAL_LLM_ID, probeHindsightHealth, probeLocalLlmHealth } from "./hindsight.js";
 import { PROXY_HEALTH_PATH } from "./proxy.js";
 
 export { PROXY_HEALTH_PATH };
@@ -76,6 +76,7 @@ export async function probeHttpHealth(id, url, { fetchImpl = fetch, timeoutMs = 
 
 /** One entry point for every service status object shown in the dashboard. */
 export function probeServiceHealth(svc, options) {
+  if (svc.id === LOCAL_LLM_ID) return probeLocalLlmHealth(svc.apiUrl, options);
   if (svc.runtime === "docker") return probeHindsightHealth(svc.apiUrl, options);
   return probeHttpHealth(svc.id, svc.url, options);
 }

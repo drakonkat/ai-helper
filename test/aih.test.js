@@ -399,7 +399,9 @@ describe("Configuration", () => {
     expect(SERVICE_IDS).toContain("ocx");
     expect(SERVICE_IDS).toContain("hindsight");
     expect(SERVICE_IDS).toContain("headroom");
-    expect(SERVICE_IDS.length).toBe(4);
+    // hindsight-llm: optional local LLM container, listed only when enabled in setup.
+    expect(SERVICE_IDS).toContain("hindsight-llm");
+    expect(SERVICE_IDS.length).toBe(5);
   });
 
   it("should define valid commands and dashboard URLs for all services", () => {

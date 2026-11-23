@@ -3,7 +3,9 @@ import { STARTUP_SERVICE_IDS, normalizeStartServices } from "./startup-services.
 import {
   HINDSIGHT_DEFAULTS,
   HINDSIGHT_KEY_ENV,
+  LOCAL_LLM_OPERATIONS,
   normalizeHindsightConfig,
+  normalizeLocalLlmConfig,
   readHindsightApiKey,
   validateHindsightApiKey,
 } from "./hindsight.js";
@@ -14,7 +16,7 @@ const STARTUP_FIELD = { key: "startServices", group: "Startup", label: "Services
 
 /** Shown only when Hindsight is selected for start/up. "config" maps to the saved settings. */
 export const HINDSIGHT_FIELDS = Object.freeze([
-  { key: "hindsightContainer", config: "containerName", group: "Hindsight", label: "Hindsight container name", help: "Docker container started/stopped by aih. An existing container with this name is reused as is; the settings below apply only to containers aih creates or adopts (u on hindsight in the dashboard imports an existing container's settings)." },
+  { key: "hindsightContainer", config: "containerName", group: "Hindsight", label: "Hindsight container name", help: "Docker container started/stopped by aih. An existing container with this name is reused as is; the settings below apply only to containers aih creates or adopts (u twice on hindsight in the dashboard imports an existing container or docker compose stack, including its local LLM)." },
   { key: "hindsightImage", config: "image", group: "Hindsight", label: "Docker image", help: "Default ghcr.io/vectorize-io/hindsight:latest. Pin a version (e.g. :1.2.0) for repeatable installs: update (u) moves it to the latest release." },
   { key: "hindsightApiPort", config: "apiPort", group: "Hindsight", label: "API port", help: "Loopback port for the Hindsight API and its /health check. Default 8888." },
   { key: "hindsightUiPort", config: "uiPort", group: "Hindsight", label: "Web UI port", help: "Loopback port of the Hindsight control plane, opened with o in the dashboard. Default 9999." },
@@ -25,6 +27,31 @@ export const HINDSIGHT_FIELDS = Object.freeze([
   { key: "hindsightApiKey", secret: true, group: "Hindsight LLM", label: "LLM API key", help: `Saved to ~/.aih/hindsight.env and passed with docker --env-file; never stored in state.json or on command lines. Empty = keep the saved key (or ${HINDSIGHT_KEY_ENV} from the environment).` },
   { key: "hindsightEnvFile", config: "envFile", group: "Hindsight advanced", label: "Extra environment file", help: "Optional docker --env-file with advanced HINDSIGHT_* settings (timeouts, failover models...). Empty = none." },
 ]);
+
+/** The local LLM step; "llm" maps to config.localLlm. The other fields appear only when it is on. */
+const LOCAL = "Hindsight local LLM";
+export const LOCAL_LLM_TOGGLE = Object.freeze({ key: "hindsightLocalEnabled", llm: "enabled", group: LOCAL, label: "Local LLM for Hindsight", choices: ["off", "on"],
+  help: "on = aih also runs a llama.cpp server container (hindsight-llm), starts it before Hindsight and stops it after, and sends the operations you choose to it. Other operations keep the LLM above." });
+export const LOCAL_LLM_FIELDS = Object.freeze([
+  { key: "hindsightLocalImage", llm: "image", group: LOCAL, label: "llama.cpp server image", help: "Pin a build, e.g. ghcr.io/ggml-org/llama.cpp:server-cuda-b12282. u re-pulls this tag but never moves it: change the build here, by hand." },
+  { key: "hindsightLocalModelsDir", llm: "modelsDir", group: LOCAL, label: "Models folder", help: "Absolute host folder with the GGUF files, mounted read-only at /models." },
+  { key: "hindsightLocalModel", llm: "model", group: LOCAL, label: "Model file", help: "GGUF file inside the models folder, e.g. LFM3-1.7B-Q8_0.gguf." },
+  { key: "hindsightLocalLora", llm: "lora", group: LOCAL, label: "LoRA adapter", help: "Optional GGUF adapter inside the models folder. Empty = none." },
+  { key: "hindsightLocalAlias", llm: "alias", group: LOCAL, label: "Model alias", help: "Name the server answers to and Hindsight asks for (--alias)." },
+  { key: "hindsightLocalPort", llm: "port", group: LOCAL, label: "Host port", help: "Loopback port of the server, for its health check and your own tests. Hindsight uses the Docker network. Default 8085." },
+  { key: "hindsightLocalGpus", llm: "gpus", group: LOCAL, label: "GPUs", help: "docker --gpus value: all, a count, device=0,1, or none for CPU only (then use a CPU image tag)." },
+  { key: "hindsightLocalCtxSize", llm: "ctxSize", group: LOCAL, label: "Context size", help: "Total --ctx-size, shared by the parallel slots: each slot gets context / slots tokens." },
+  { key: "hindsightLocalParallel", llm: "parallel", group: LOCAL, label: "Parallel slots", help: "--parallel: requests served at the same time." },
+  { key: "hindsightLocalExtraArgs", llm: "extraArgs", group: LOCAL, label: "Extra llama-server arguments", help: "Space-separated, e.g. --jinja --n-gpu-layers 999 --flash-attn on --no-kv-unified --metrics. Model, adapter, alias, host, port, context and slots come from the fields above." },
+  { key: "hindsightLocalOperations", llm: "operations", group: LOCAL, label: "Operations sent to the local LLM", choices: LOCAL_LLM_OPERATIONS, multiple: true,
+    help: "Arrows move; Space toggles. Mental model refresh follows reflect unless chosen separately. Unchosen operations use the Hindsight LLM." },
+  { key: "hindsightLocalMaxConcurrent", llm: "maxConcurrent", group: LOCAL, label: "Max concurrent requests", help: "Per operation; at most the parallel slots." },
+  { key: "hindsightLocalTimeout", llm: "timeout", group: LOCAL, label: "Timeout (seconds)", help: "Per request to the local LLM." },
+  { key: "hindsightLocalMaxContext", llm: "maxContextTokens", group: LOCAL, label: "Reflect max context tokens", help: "Reflect prompt budget. Context + completion must fit one slot." },
+  { key: "hindsightLocalMaxCompletion", llm: "maxCompletionTokens", group: LOCAL, label: "Reflect max completion tokens", help: "Reflect answer budget." },
+]);
+const ALL_LOCAL_FIELDS = [LOCAL_LLM_TOGGLE, ...LOCAL_LLM_FIELDS];
+const localValue = (field, llm) => field.llm === "enabled" ? (llm.enabled ? "on" : "off") : Array.isArray(llm[field.llm]) ? llm[field.llm].join(",") : String(llm[field.llm] ?? "");
 
 const clean = value => String(value ?? "").replace(/[\x00-\x1f\x7f-\x9f]/g, " ");
 const isHindsightField = field => field.key.startsWith("hindsight");
@@ -43,8 +70,9 @@ export class ProxySetupWizard {
     this.hindsightSaved = state.config?.hindsight ? savedHindsight(state) : null;
     const hindsight = savedHindsight(state);
     for (const f of HINDSIGHT_FIELDS) this.draft[f.key] = f.secret ? "" : String(hindsight[f.config] ?? "");
+    for (const f of ALL_LOCAL_FIELDS) this.draft[f.key] = localValue(f, hindsight.localLlm);
     this.keyStatus = keyStatus;
-    this.serviceIndex = 0;
+    this.choiceIndex = {};
     this.initial = { ...this.draft };
     this.active = state.services?.proxy?.proxyOptions;
     this.running = state.services?.proxy?.status === "running";
@@ -60,16 +88,21 @@ export class ProxySetupWizard {
   }
 
   get hindsightSelected() { return this.draft.startServices.split(",").includes("hindsight"); }
+  get localLlmSelected() { return this.hindsightSelected && this.draft.hindsightLocalEnabled === "on"; }
   get fields() {
     return [...PROXY_FIELDS.filter(f => !f.stage || this.draft.preset.split("-").includes(f.stage)), STARTUP_FIELD,
-      ...(this.hindsightSelected ? HINDSIGHT_FIELDS : [])];
+      ...(this.hindsightSelected ? [...HINDSIGHT_FIELDS, LOCAL_LLM_TOGGLE] : []), ...(this.localLlmSelected ? LOCAL_LLM_FIELDS : [])];
   }
   get field() { return this.fields[this.step]; }
   get summary() { return this.step >= this.fields.length; }
   get dirty() { return JSON.stringify(this.initial) !== JSON.stringify(this.draft); }
 
   hindsightDraft() {
-    return Object.fromEntries(HINDSIGHT_FIELDS.filter(f => !f.secret).map(f => [f.config, this.draft[f.key]]));
+    return { ...Object.fromEntries(HINDSIGHT_FIELDS.filter(f => !f.secret).map(f => [f.config, this.draft[f.key]])), localLlm: this.localLlmDraft() };
+  }
+
+  localLlmDraft(enabled = this.draft.hindsightLocalEnabled === "on") {
+    return { ...Object.fromEntries(LOCAL_LLM_FIELDS.map(f => [f.llm, this.draft[f.key]])), enabled };
   }
 
   /** null when Hindsight is not started by start/up: its settings are then left untouched. */
@@ -93,8 +126,10 @@ export class ProxySetupWizard {
   validateField() {
     const field = this.field;
     const value = this.draft[field.key];
-    if (field.multiple) { normalizeStartServices(value.split(",")); return; }
+    if (field === STARTUP_FIELD) { normalizeStartServices(value.split(",")); return; }
     if (field.secret) { validateHindsightApiKey(value.trim()); return; }
+    // Field by field only the format is checked; the summary checks the whole local LLM setup.
+    if (field.llm) { normalizeLocalLlmConfig(this.localLlmDraft(false)); return; }
     if (isHindsightField(field)) { normalizeHindsightConfig(this.hindsightDraft()); return; }
     // Validate only this field, against known valid defaults, without discarding other edits.
     const base = proxySetupDraft({ services: {} });
@@ -150,11 +185,12 @@ export class ProxySetupWizard {
     }
     if (f.choices) {
       if (f.multiple) {
-        if (key === "\x1b[A") this.serviceIndex = (this.serviceIndex + f.choices.length - 1) % f.choices.length;
-        if (key === "\x1b[B") this.serviceIndex = (this.serviceIndex + 1) % f.choices.length;
+        const index = this.choiceIndex[f.key] || 0;
+        if (key === "\x1b[A") this.choiceIndex[f.key] = (index + f.choices.length - 1) % f.choices.length;
+        if (key === "\x1b[B") this.choiceIndex[f.key] = (index + 1) % f.choices.length;
         if (key === " ") {
           const selected = new Set(value.split(",").filter(Boolean));
-          const service = f.choices[this.serviceIndex];
+          const service = f.choices[index];
           if (selected.has(service)) selected.delete(service); else selected.add(service);
           this.draft[f.key] = f.choices.filter(id => selected.has(id)).join(",");
         }
@@ -210,13 +246,15 @@ export class ProxySetupWizard {
         return wrap(`${before !== after ? "* " : "  "}${f.label}: ${after || (f.key === "models" ? "pxpipe defaults; RTK/Headroom on all" : "(none)")}${before !== after ? ` (previous: ${before || "empty"})` : ""}`);
       });
       if (this.hindsightSelected) {
-        body.push(...HINDSIGHT_FIELDS.flatMap(f => {
+        body.push(...[...HINDSIGHT_FIELDS, LOCAL_LLM_TOGGLE, ...(this.localLlmSelected ? LOCAL_LLM_FIELDS : [])].flatMap(f => {
           if (f.secret) return wrap(this.draft[f.key].trim() ? `* ${f.label}: new key (hidden)` : `  ${f.label}: unchanged (${this.keyDescription()})`);
           const before = this.initial[f.key];
           const after = this.draft[f.key];
           return wrap(`${before !== after ? "* " : "  "}${f.label}: ${after || "(none)"}${before !== after ? ` (previous: ${before || "empty"})` : ""}`);
         }));
         body.push(...wrap("Hindsight: settings are saved; apply recreates a running container created by aih (data volume kept). Other containers are left unchanged until adopted (u on the dashboard)."));
+        if (this.localLlmSelected) body.push(...wrap("Local LLM: started before Hindsight and stopped after it; a new or changed server must answer a test completion before Hindsight starts."));
+        else if (this.hindsightSaved?.localLlm?.enabled) body.push(...wrap("Local LLM: turned off; apply stops its container and Hindsight uses its own LLM for every operation."));
       }
       body.push(...wrap(this.running ? "WARNING: apply now restarts the proxy and interrupts active requests/streams." : "Apply now starts the proxy. Save only leaves it stopped."));
       body.push(...this.checks.flatMap(wrap));
@@ -225,7 +263,7 @@ export class ProxySetupWizard {
       const f = this.field;
       body.push(...wrap(f.label), ...wrap(f.help), "");
       if (f.choices) body.push(...f.choices.map((v, i) => f.multiple
-        ? `${i === this.serviceIndex ? ">" : " "} [${this.draft[f.key].split(",").includes(v) ? "x" : " "}] ${v}`
+        ? `${i === (this.choiceIndex[f.key] || 0) ? ">" : " "} [${this.draft[f.key].split(",").includes(v) ? "x" : " "}] ${v}`
         : `${v === this.draft[f.key] ? ">" : " "} ${v.replaceAll("-", " -> ")}`));
       else {
         const value = this.draft[f.key];
@@ -236,6 +274,9 @@ export class ProxySetupWizard {
       if (f.secret) {
         body.push(...wrap("Initial value: (empty: keep the current key)"));
         body.push(...wrap(`Current setting: key ${this.keyDescription()}`));
+      } else if (f.llm) {
+        body.push(...wrap(`Initial value: ${this.initial[f.key] || "(empty)"}`));
+        body.push(...wrap(`Current setting: ${this.hindsightSaved ? localValue(f, this.hindsightSaved.localLlm) || "(empty)" : "(not configured: defaults)"}`));
       } else if (isHindsightField(f)) {
         body.push(...wrap(`Initial value: ${this.initial[f.key] || "(empty)"}`));
         body.push(...wrap(`Current setting: ${this.hindsightSaved ? String(this.hindsightSaved[f.config] ?? "") || "(empty)" : "(not configured: defaults)"}`));

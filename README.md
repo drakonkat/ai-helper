@@ -93,6 +93,7 @@ bun add -g @drakonkat/ai-helper
 | **`pxpipe`** | `npx pxpipe-proxy` | [`http://localhost:47821`](http://localhost:47821) | [teamchong/pxpipe](https://github.com/teamchong/pxpipe) | AI LLM & MCP protocol reverse proxy bridge |
 | **`ocx`** | `ocx start` | [`http://localhost:10100`](http://localhost:10100) | [lidge-jun/opencodex](https://github.com/lidge-jun/opencodex) | OpenCode interpreter execution daemon |
 | **`hindsight`** | Docker container `hindsight` (`ghcr.io/vectorize-io/hindsight`) | [`http://localhost:9999`](http://localhost:9999) (UI), API `http://127.0.0.1:8888` | [vectorize-io/hindsight](https://github.com/vectorize-io/hindsight) | Long-term agent memory; requires Docker; health from `/health` |
+| **`hindsight-llm`** | Docker container `hindsight-llm` (`ghcr.io/ggml-org/llama.cpp` server) | API `http://127.0.0.1:8085` | [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) | Optional local LLM for selected Hindsight operations; listed only when enabled |
 | **`headroom`** | `headroom proxy` | [`http://localhost:8787/dashboard`](http://localhost:8787/dashboard) | [headroomlabs-ai/headroom](https://github.com/headroomlabs-ai/headroom) | Context optimization & LLM compression proxy |
 | **`proxy`** | `aih start proxy <upstream>` | `http://127.0.0.1:10101` | [drakonkat/ai-helper](https://github.com/drakonkat/ai-helper) | HTTP/SSE/WebSocket forwarding with optional presets; **no web dashboard** |
 
@@ -138,6 +139,44 @@ not by PID, and never kills processes on its ports (on Windows they belong to Do
   through `/health`. To go back, restore the archive into the volume with the container
   stopped and set the previous tag in the settings:
   `docker run --rm -v hindsight-data:/d -v ~/.aih/backups:/b alpine sh -c "rm -rf /d/* /d/.[!.]* && tar xzf /b/<file> -C /d"`.
+- aih refuses to start its container while another container not created by aih is
+  running on the same data volume (two Hindsight servers would corrupt the database);
+  `u` on hindsight then offers to adopt that container.
+
+#### Local LLM (`hindsight-llm`)
+
+Hindsight can send some operations to a local model while the others keep the LLM
+above. When enabled in setup (step **Hindsight local LLM**), aih also manages a
+llama.cpp server container, `hindsight-llm`:
+
+- Both containers join the Docker network `aih-hindsight` (created when needed);
+  Hindsight calls `http://hindsight-llm:8080/v1`. The server is also published on
+  `127.0.0.1:8085` for its health check and your own tests.
+- Settings: image (pin a build, e.g. `server-cuda-b12282`), models folder (mounted read-only at
+  `/models`), model file, optional LoRA adapter, alias, GPUs (`--gpus all` by default,
+  `none` for CPU), context size, parallel slots, extra llama-server arguments, the
+  operations to route (`reflect`, `retain`, `consolidation`, `mental_model_refresh`;
+  mental model refresh follows reflect unless chosen), max concurrent requests, timeout
+  and the reflect token budgets. aih writes the matching `HINDSIGHT_API_<OPERATION>_LLM_*`
+  variables; they override the same names in the extra env file. Setup refuses a reflect
+  budget (context + completion) larger than one slot.
+- **start hindsight** starts the local LLM first and starts Hindsight only after the LLM
+  answers `/health` (up to 5 minutes while the model loads) and, when its container is new
+  or was recreated, a one-token test completion. **stop hindsight** stops Hindsight, then
+  the LLM. `hindsight-llm` can also be started, stopped and restarted on its own; stopping
+  it while Hindsight runs makes the routed operations fail until it is back.
+- The dashboard shows it as its own row: health from llama.cpp `/health` (`degraded` while
+  loading), `VERSION` is the llama.cpp build and `UPDATE` shows `pinned`.
+- **The llama.cpp build is changed by hand**: edit the image tag in setup. `u` /
+  `aih update hindsight-llm` only pulls the same tag again; if the image changed it
+  recreates the container, and if the new image fails its health check or test completion
+  it goes back to the previous image. The container holds no data, so there is no backup.
+- Adopting works for a whole docker compose stack: `aih update hindsight --adopt` on a
+  Hindsight container whose operations call another container (e.g.
+  `http://lfm3-hindsight:8080/v1`) imports that container's image, models folder,
+  arguments and GPUs as the local LLM settings, archives the data volume, and recreates
+  both as `hindsight` and `hindsight-llm`. A stopped container left by aih under one of
+  those names is replaced. Afterwards do not run `docker compose up` for that project again.
 
 Settings are edited in `aih status --ui` → **`c`** after selecting **hindsight** in the
 Startup step: container name, image (default `ghcr.io/vectorize-io/hindsight:latest`),

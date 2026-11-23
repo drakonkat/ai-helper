@@ -5,11 +5,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   HINDSIGHT_DEFAULTS,
+  LOCAL_LLM_DEFAULTS,
   hindsightConfigHash,
   hindsightRunArgs,
+  localLlmConfigHash,
+  localLlmRunArgs,
+  normalizeLocalLlmConfig,
   normalizeHindsightConfig,
   preflightHindsight,
   probeHindsightHealth,
+  probeLocalLlmHealth,
   readHindsightApiKey,
   saveHindsightApiKey,
 } from "../src/hindsight.js";
@@ -38,46 +43,74 @@ const container = ({ labels = {}, state = exited, image = "sha256:old" } = {}) =
 });
 const IMAGE_ENV = ["PATH=/usr/bin", "HINDSIGHT_API_PORT=8888", "HINDSIGHT_CP_DATAPLANE_API_URL=http://localhost:8888"];
 
-/** Docker CLI double: records argv, never touches a real daemon. */
-function fakeDocker({ current = null, image = "sha256:new", available = true, runExit = 0, backupExit = 0 } = {}) {
+/** Docker CLI double: records argv, never touches a real daemon. "current" is the container named hindsight. */
+function fakeDocker({ current = null, containers = {}, image = "sha256:new", images = {}, imageEnvs = {}, available = true, runExit = 0, backupExit = 0, network = true, onPull } = {}) {
   const calls = [];
-  let state = current;
+  const state = { ...(current ? { hindsight: current } : {}), ...containers };
   const run = async (command, args) => {
     assert.equal(command, "docker");
     calls.push(args);
     if (!available) return fail("error during connect: the docker daemon is not running");
     switch (args[0]) {
       case "version": return ok("29.0.0\n");
-      case "container": return state ? ok(JSON.stringify([state])) : fail("Error response from daemon: No such container: " + args[2]);
-      case "image":
-        if (args.includes("{{json .Config.Env}}")) return ok(JSON.stringify(IMAGE_ENV));
-        return image ? ok(image + "\n") : fail("Error: No such image");
-      case "pull": image = "sha256:new"; return ok("pulled");
+      case "container": return state[args[2]] ? ok(JSON.stringify([state[args[2]]])) : fail("Error response from daemon: No such container: " + args[2]);
+      case "image": {
+        const ref = args.at(-1);
+        if (args.includes("{{json .Config.Env}}")) return ok(JSON.stringify(imageEnvs[ref] || IMAGE_ENV));
+        const id = ref in images ? images[ref] : image;
+        return id ? ok(id + "\n") : fail("Error: No such image");
+      }
+      case "pull":
+        if (args[1] in images) images[args[1]] = onPull?.(args[1]) || "sha256:pulled";
+        else image = "sha256:new";
+        return ok("pulled");
+      case "ps": {
+        const volume = args[args.indexOf("--filter") + 1].slice("volume=".length);
+        return ok(Object.entries(state).filter(([, c]) => (c.Mounts || []).some(m => m.Name === volume)).map(([name]) => name).join("\n") + "\n");
+      }
+      case "network":
+        if (args[1] === "inspect") return network ? ok("aih-hindsight\n") : fail("Error: network aih-hindsight not found");
+        network = true;
+        return ok("created");
+      case "tag": return ok("");
       case "run": {
         if (args.includes("--rm")) return backupExit ? fail("tar: write error") : ok("");
         if (runExit) return fail("port is already allocated");
+        const name = args[args.indexOf("--name") + 1];
         const labels = Object.fromEntries(args.flatMap((a, i) => a === "--label" ? [args[i + 1].split("=")] : []));
-        state = container({ labels, state: running, image });
+        const ref = args.find(a => /^ghcr\.io\//.test(a));
+        state[name] = container({ labels, state: running, image: ref in images ? images[ref] : image });
         return ok("0123456789abcdef\n");
       }
-      case "start": state = { ...state, State: running }; return ok(args[1]);
-      case "stop": if (!state) return fail("Error: No such container: x"); state = { ...state, State: exited }; return ok(args[1]);
-      case "rm": state = null; return ok(args.at(-1));
+      case "start": state[args[1]] = { ...state[args[1]], State: running }; return ok(args[1]);
+      case "stop": if (!state[args[1]]) return fail("Error: No such container: " + args[1]); state[args[1]] = { ...state[args[1]], State: exited }; return ok(args[1]);
+      case "rm": delete state[args.at(-1)]; return ok(args.at(-1));
       default: throw new Error("unexpected docker " + args.join(" "));
     }
   };
-  return { run, calls, verbs: () => calls.map(a => a[0] === "container" || a[0] === "image" ? a[0] + " " + a[1] : a[0]), get state() { return state; } };
+  return { run, calls, verbs: () => calls.map(a => ["container", "image", "network"].includes(a[0]) ? a[0] + " " + a[1] : a[0]),
+    get state() { return state.hindsight || null; }, containers: state };
 }
 
-function dockerManager(docker, { health = { state: "healthy", status: "healthy", database: "connected", version: "1.1.0" }, config } = {}) {
+function dockerManager(docker, { health = { state: "healthy", status: "healthy", database: "connected", version: "1.1.0" }, config,
+  llmHealth = { state: "healthy", status: "ok", build: "b12282", model: "lfm3" }, smoke = { ok: true }, files = true } = {}) {
   const m = new ServiceManager();
   let data = { services: {}, config: config ? { hindsight: config } : {} };
   m.readState = () => { const s = structuredClone(data); s.services ||= {}; delete s.services.agentmemory; return s; };
   m.loadState = m.readState;
   m.saveState = value => { data = structuredClone(value); };
-  m.syncState = async () => { const s = m.readState(); await m.syncDockerService(s, "hindsight"); m.saveState(s); return s; };
+  m.syncState = async () => {
+    const s = m.readState();
+    await m.syncDockerService(s, "hindsight");
+    if (s.config?.hindsight?.localLlm?.enabled) await m.syncDockerService(s, "hindsight-llm");
+    m.saveState(s);
+    return s;
+  };
   m.runDocker = docker.run;
   m.probeHealth = async url => ({ url: url + "/health", checkedAt: Date.now(), ...(typeof health === "function" ? health() : health) });
+  m.probeLlmHealth = async url => ({ url: url + "/health", checkedAt: Date.now(), ...(typeof llmHealth === "function" ? llmHealth() : llmHealth) });
+  m.smokeTestLlm = async () => typeof smoke === "function" ? smoke() : smoke;
+  m.fileExists = () => files;
   m.hindsightPollMs = 1;
   return m;
 }
@@ -85,7 +118,8 @@ function dockerManager(docker, { health = { state: "healthy", status: "healthy",
 const managedHash = () => hindsightConfigHash(normalizeHindsightConfig(), readHindsightApiKey().key);
 
 test("settings validate Docker names, loopback ports and URLs; the key never reaches argv", async () => {
-  assert.deepEqual(normalizeHindsightConfig(), { ...HINDSIGHT_DEFAULTS });
+  assert.deepEqual(normalizeHindsightConfig(), { ...HINDSIGHT_DEFAULTS, localLlm: normalizeLocalLlmConfig() });
+  assert.equal(normalizeHindsightConfig().localLlm.enabled, false);
   assert.equal(normalizeHindsightConfig({ apiPort: "18888", llmProvider: "OpenAI" }).apiPort, 18888);
   for (const bad of [{ containerName: "bad name" }, { apiPort: 0 }, { uiPort: "x" }, { apiPort: 9999 },
     { image: "img with space" }, { llmBaseUrl: "ftp://x" }, { llmBaseUrl: "http://u:p@host" }, { llmModel: "a b" }, { volume: "../x" }]) {
@@ -132,7 +166,7 @@ test("start creates a missing container (pull, run) and succeeds only after /hea
   const result = await m.startService("hindsight");
   assert.equal(result.success, true, result.message);
   assert.match(result.message, /created; health: healthy v1\.1\.0/);
-  assert.deepEqual(docker.verbs(), ["version", "container inspect", "image inspect", "pull", "run", "container inspect"]);
+  assert.deepEqual(docker.verbs(), ["version", "container inspect", "ps", "image inspect", "pull", "run", "container inspect"]);
   const run = docker.calls.find(a => a[0] === "run");
   assert.ok(!run.join(" ").includes("sk-secret"));
   assert.ok(run.includes("io.aih.config=" + managedHash()));
@@ -146,12 +180,12 @@ test("start creates a missing container (pull, run) and succeeds only after /hea
 test("start reuses foreign containers, recreates changed aih containers and reports running ones", async () => {
   const foreign = fakeDocker({ current: container({ labels: { "com.docker.compose.project": "hindsight" } }) });
   assert.equal((await dockerManager(foreign).startService("hindsight")).success, true);
-  assert.deepEqual(foreign.verbs(), ["version", "container inspect", "start", "container inspect"]);
+  assert.deepEqual(foreign.verbs(), ["version", "container inspect", "ps", "start", "container inspect"]);
 
   const changed = fakeDocker({ current: container({ labels: { "io.aih.managed": "true", "io.aih.config": "old" } }) });
   const recreated = await dockerManager(changed).startService("hindsight");
   assert.match(recreated.message, /recreated/);
-  assert.deepEqual(changed.verbs(), ["version", "container inspect", "rm", "image inspect", "run", "container inspect"]);
+  assert.deepEqual(changed.verbs(), ["version", "container inspect", "ps", "rm", "image inspect", "run", "container inspect"]);
   assert.deepEqual(changed.calls.find(a => a[0] === "rm"), ["rm", "hindsight"]); // never -v: the volume keeps data
 
   const live = fakeDocker({ current: container({ state: running }) });
@@ -238,7 +272,7 @@ test("update pulls and recreates only aih containers", async () => {
   assert.equal(updated.success, true, updated.message);
   assert.match(updated.message, /updated from 1\.1\.0 to 1\.2\.0 and restarted \(data backup: .*hindsight-\d{8}T\d{6}\.tgz\)/);
   // Graceful stop, archive of the volume with the old image, then removal without -f or -v.
-  assert.deepEqual(outdated.verbs().slice(4, 8), ["stop", "run", "rm", "version"]);
+  assert.deepEqual(outdated.verbs().slice(5, 9), ["stop", "run", "rm", "version"]);
   const backup = outdated.calls.find(a => a[0] === "run" && a.includes("--rm"));
   assert.ok(backup.includes("hindsight-data:/d:ro") && backup.includes(join(home, "backups") + ":/b") && backup.includes("sha256:old"), backup.join(" "));
   assert.deepEqual(outdated.calls.find(a => a[0] === "rm"), ["rm", "hindsight"]);
@@ -271,7 +305,7 @@ test("update moves a release tag of the official image to the latest release", a
     const result = await same.updateService("hindsight", releases(latest));
     assert.match(result.message, expected);
     assert.equal(result.success, latest !== null);
-    assert.deepEqual(idle.verbs(), ["version", "container inspect"]);
+    assert.deepEqual(idle.verbs(), ["version", "container inspect", "ps"]);
     assert.equal(same.readState().config.hindsight.image, config.image);
   }
 
@@ -305,15 +339,17 @@ test("adopt imports a foreign container's settings and recreates it on the same 
     const m = dockerManager(docker);
     const adopted = await m.updateService("hindsight", { adopt: true });
     assert.equal(adopted.success, true, adopted.message);
-    assert.match(adopted.message, /adopted and recreated by aih \(data volume 'my-data' kept; healthy/);
+    assert.match(adopted.message, /adopted and recreated by aih as 'hindsight' \(data volume 'my-data' kept, backup .*hindsight-\d{8}T\d{6}\.tgz; healthy/);
+    assert.match(adopted.message, /Do not run 'docker compose up' for project 'hindsight' again/);
     const extra = join(home, "hindsight-extra.env");
     assert.deepEqual(m.readState().config.hindsight, normalizeHindsightConfig({ image: "ghcr.io/vectorize-io/hindsight:1.1.0", volume: "my-data",
       apiPort: 18888, uiPort: 19999, llmModel: "auto-free", llmBaseUrl: "https://gateway.example/v1", envFile: extra }));
     assert.deepEqual(readHindsightApiKey(), { key: "sk-adopted", source: "file" });
     // Image defaults and the variables aih sets itself are not copied; everything else is, verbatim.
     assert.equal(await readFile(extra, "utf8"), 'HINDSIGHT_API_LLM_1_API_KEY=sk-second\nHINDSIGHT_API_LLM_STRATEGY={"mode":"failover","a":"b=c"}\n');
-    assert.deepEqual(docker.verbs(), ["version", "container inspect", "image inspect", "stop", "rm", "version", "container inspect", "image inspect", "run", "container inspect"]);
-    const run = docker.calls.find(a => a[0] === "run");
+    // Stop, archive the volume, then replace: adoption never goes ahead without a backup.
+    assert.deepEqual(docker.verbs(), ["version", "container inspect", "image inspect", "stop", "run", "rm", "version", "container inspect", "ps", "image inspect", "run", "container inspect"]);
+    const run = docker.calls.find(a => a[0] === "run" && !a.includes("--rm"));
     for (const expected of ["io.aih.managed=true", "my-data:/home/hindsight/.pg0", "127.0.0.1:18888:8888", "127.0.0.1:19999:9999", extra]) assert.ok(run.includes(expected), expected);
     assert.ok(!docker.calls.flat().join(" ").includes("sk-"), "no secret on a docker command line");
     assert.equal(run.at(-1), "ghcr.io/vectorize-io/hindsight:1.1.0", "adoption keeps the image; updating is a separate step");
@@ -323,6 +359,171 @@ test("adopt imports a foreign container's settings and recreates it on the same 
     saveHindsightApiKey("sk-secret");
   }
 });
+
+const LLM_ENV = ["PATH=/usr/bin", "LLAMA_ARG_HOST=0.0.0.0", "LLAMA_ARG_PORT=8080"];
+const llmConfig = (overrides = {}) => normalizeHindsightConfig({ localLlm: { enabled: true, modelsDir: "C:/models", model: "base.gguf", lora: "adapter.gguf",
+  alias: "lfm3", ctxSize: 131072, parallel: 2, maxConcurrent: 2, ...overrides } });
+const managed = (config, extra = {}) => container({ state: running, labels: { "io.aih.managed": "true", "io.aih.config": hindsightConfigHash(config, readHindsightApiKey().key) }, ...extra });
+const managedLlm = (llm, extra = {}) => container({ state: running, labels: { "io.aih.managed": "true", "io.aih.role": "llm", "io.aih.config": localLlmConfigHash(llm) }, ...extra });
+
+test("local LLM settings: validated only when enabled, routed per operation, never repeated in extra arguments", () => {
+  assert.equal(normalizeLocalLlmConfig({ modelsDir: "relative" }).enabled, false, "disabled settings may stay incomplete");
+  assert.throws(() => normalizeLocalLlmConfig({ enabled: true, modelsDir: "C:/m" }), /model file: required/);
+  assert.throws(() => normalizeLocalLlmConfig({ enabled: true, modelsDir: "models", model: "a.gguf" }), /absolute path/);
+  assert.throws(() => normalizeLocalLlmConfig({ enabled: true, modelsDir: "C:/m", model: "../a.gguf" }), /inside the models folder/);
+  assert.throws(() => normalizeLocalLlmConfig({ extraArgs: "--jinja --ctx-size 4096" }), /--ctx-size is set by aih/);
+  assert.throws(() => normalizeLocalLlmConfig({ operations: "reflect,embed" }), /'embed' is not one of/);
+  assert.throws(() => normalizeLocalLlmConfig({ enabled: true, modelsDir: "C:/m", model: "a.gguf", maxConcurrent: 2 }), /cannot exceed its 1 parallel slots/);
+  assert.throws(() => normalizeLocalLlmConfig({ enabled: true, modelsDir: "C:/m", model: "a.gguf", ctxSize: 32768 }), /exceed the 32768 tokens of each local LLM slot/);
+  assert.throws(() => normalizeHindsightConfig({ localLlm: { enabled: true, modelsDir: "C:/m", model: "a.gguf", port: 8888 } }), /must differ/);
+  assert.deepEqual(normalizeLocalLlmConfig({ operations: "consolidation, REFLECT" }).operations, ["reflect", "consolidation"]);
+  assert.equal(normalizeLocalLlmConfig({ gpus: "none" }).gpus, "");
+
+  const config = llmConfig();
+  const llm = localLlmRunArgs(config.localLlm, { configHash: "h" });
+  assert.deepEqual(llm.slice(0, 8), ["run", "-d", "--name", "hindsight-llm", "--restart", "unless-stopped", "--network", "aih-hindsight"]);
+  for (const expected of ["127.0.0.1:8085:8080", "type=bind,source=C:/models,target=/models,readonly", "io.aih.role=llm", "--gpus"]) assert.ok(llm.includes(expected), expected);
+  assert.deepEqual(llm.slice(llm.indexOf(LOCAL_LLM_DEFAULTS.image)), [LOCAL_LLM_DEFAULTS.image, "--model", "/models/base.gguf", "--lora", "/models/adapter.gguf",
+    "--alias", "lfm3", "--host", "0.0.0.0", "--port", "8080", "--ctx-size", "131072", "--parallel", "2", "--jinja", "--n-gpu-layers", "999", "--flash-attn", "on", "--metrics"]);
+  const args = hindsightRunArgs(config, { configHash: "h", keySource: "file" });
+  assert.ok(args.includes("aih-hindsight"));
+  for (const expected of ["HINDSIGHT_API_REFLECT_LLM_BASE_URL=http://hindsight-llm:8080/v1", "HINDSIGHT_API_REFLECT_LLM_MODEL=lfm3",
+    "HINDSIGHT_API_REFLECT_LLM_MAX_CONCURRENT=2", "HINDSIGHT_API_REFLECT_MAX_CONTEXT_TOKENS=48000"]) assert.ok(args.includes(expected), expected);
+  assert.ok(!args.some(a => a.startsWith("HINDSIGHT_API_RETAIN_")), "only the selected operations are routed");
+  assert.ok(!hindsightRunArgs(normalizeHindsightConfig(), { configHash: "h", keySource: "file" }).includes("--network"));
+  // Without a local LLM the fingerprint is unchanged, so upgrading aih does not recreate Hindsight.
+  assert.equal(hindsightConfigHash(normalizeHindsightConfig()), hindsightConfigHash({ ...normalizeHindsightConfig(), localLlm: undefined }));
+  assert.equal(localLlmConfigHash(config.localLlm), localLlmConfigHash({ ...config.localLlm, timeout: 999 }), "routing changes recreate Hindsight only");
+  assert.notEqual(hindsightConfigHash(config), hindsightConfigHash({ ...config, localLlm: { ...config.localLlm, timeout: 999 } }));
+});
+
+test("local LLM health: 503 while loading, healthy with build and model once loaded", async () => {
+  const reply = (status, body) => new Response(JSON.stringify(body), { status });
+  const loading = await probeLocalLlmHealth("http://127.0.0.1:8085", { fetchImpl: async () => reply(503, { error: { code: 503, message: "Loading model" } }) });
+  assert.equal(loading.state, "degraded");
+  assert.equal(loading.detail, "loading model");
+  const ready = await probeLocalLlmHealth("http://127.0.0.1:8085", { fetchImpl: async url => url.endsWith("/props")
+    ? reply(200, { build_info: "b12282-aa75ff323", model_alias: "lfm3" }) : reply(200, { status: "ok" }) });
+  assert.deepEqual([ready.state, ready.build, ready.model], ["healthy", "b12282", "lfm3"]);
+});
+
+test("start brings up the local LLM first and stop takes Hindsight down first", async () => {
+  const config = llmConfig();
+  const docker = fakeDocker({ network: false });
+  const m = dockerManager(docker, { config });
+  const started = await m.startService("hindsight");
+  assert.equal(started.success, true, started.message);
+  assert.match(started.message, /'hindsight' created; .* \| local LLM: healthy \(llama\.cpp b12282, model lfm3\)/);
+  const runs = docker.calls.filter(a => a[0] === "run").map(a => a[a.indexOf("--name") + 1]);
+  assert.deepEqual(runs, ["hindsight-llm", "hindsight"]);
+  assert.ok(docker.calls.some(a => a[0] === "network" && a[1] === "create"));
+  assert.deepEqual(Object.keys(m.readState().services).filter(id => id.startsWith("hindsight")), ["hindsight", "hindsight-llm"]);
+  assert.equal(m.readState().services["hindsight-llm"].apiUrl, "http://127.0.0.1:8085");
+
+  const stopped = await m.stopService("hindsight");
+  assert.match(stopped.message, /stopped \(data kept\); local LLM 'hindsight-llm' stopped/);
+  assert.deepEqual(docker.calls.filter(a => a[0] === "stop"), [["stop", "hindsight"], ["stop", "hindsight-llm"]]);
+
+  const alone = await m.stopService("hindsight-llm");
+  assert.equal(alone.success, true);
+  assert.equal((await dockerManager(fakeDocker()).startService("hindsight-llm")).success, false, "disabled: nothing to start");
+});
+
+test("Hindsight is not started when its local LLM fails, nor next to a foreign Hindsight on the same volume", async () => {
+  const config = llmConfig();
+  const missing = fakeDocker();
+  const noFiles = await dockerManager(missing, { config, files: false }).startService("hindsight");
+  assert.match(noFiles.message, /Local LLM file not found: .*base\.gguf.*Hindsight was not started/);
+  assert.ok(!missing.verbs().includes("run"));
+
+  const broken = fakeDocker();
+  const failed = await dockerManager(broken, { config, smoke: { ok: false, error: "HTTP 500: lora mismatch" } }).startService("hindsight");
+  assert.match(failed.message, /test completion failed \(HTTP 500: lora mismatch\).*Hindsight was not started/);
+  assert.deepEqual(broken.calls.filter(a => a[0] === "run").map(a => a[a.indexOf("--name") + 1]), ["hindsight-llm"]);
+
+  const rival = { ...container({ state: running, labels: { "com.docker.compose.project": "hindsight-only-reflect" } }),
+    Mounts: [{ Type: "volume", Name: "hindsight-data", Destination: "/home/hindsight/.pg0" }] };
+  const shared = fakeDocker({ containers: { "hindsight-only-reflect": rival } });
+  const refused = await dockerManager(shared).startService("hindsight");
+  assert.equal(refused.success, false);
+  assert.match(refused.message, /'hindsight-only-reflect' \(not created by aih, compose project 'hindsight-only-reflect'\) is running on data volume 'hindsight-data'/);
+  assert.ok(!shared.verbs().includes("run") && !shared.verbs().includes("start"));
+});
+
+test("local LLM update re-pulls its pinned tag and rolls back to the previous image on failure", async () => {
+  const config = llmConfig({ image: "ghcr.io/ggml-org/llama.cpp:server-cuda-b12282" });
+  const image = config.localLlm.image;
+  const current = () => ({ hindsight: managed(config), "hindsight-llm": managedLlm(config.localLlm, { image: "sha256:old" }) });
+
+  const same = fakeDocker({ containers: current(), images: { [image]: "sha256:old" }, onPull: () => "sha256:old" });
+  const unchanged = await dockerManager(same, { config }).updateService("hindsight-llm");
+  assert.equal(unchanged.alreadyUpToDate, true);
+  assert.match(unchanged.message, /pinned: to move to another build, change the local LLM image tag/);
+  assert.deepEqual(same.calls.find(a => a[0] === "pull"), ["pull", image], "the tag is never advanced");
+
+  const newer = fakeDocker({ containers: current(), images: { [image]: "sha256:old" }, onPull: () => "sha256:rebuilt" });
+  const updated = await dockerManager(newer, { config }).updateService("hindsight-llm");
+  assert.equal(updated.success, true, updated.message);
+  assert.ok(!newer.calls.some(a => a.includes("--rm")), "the stateless LLM container is not backed up");
+
+  let smokes = 0;
+  const bad = fakeDocker({ containers: current(), images: { [image]: "sha256:old" }, onPull: () => "sha256:bad" });
+  const rolled = await dockerManager(bad, { config, smoke: () => ++smokes === 1 ? { ok: false, error: "HTTP 500" } : { ok: true } }).updateService("hindsight-llm");
+  assert.equal(rolled.success, false);
+  assert.equal(rolled.rolledBack, true, rolled.message);
+  assert.deepEqual(bad.calls.find(a => a[0] === "tag"), ["tag", "sha256:old", image]);
+});
+
+test("adopting a compose stack imports Hindsight and its local LLM, archives the data and renames both", async () => {
+  const compose = { "com.docker.compose.project": "hindsight-only-reflect" };
+  const hindsight = {
+    ...container({ state: running, labels: compose }),
+    Config: { Image: "ghcr.io/vectorize-io/hindsight:1.2.3", Labels: compose, Env: [...IMAGE_ENV, "HINDSIGHT_API_LLM_PROVIDER=openai",
+      "HINDSIGHT_API_LLM_MODEL=auto-free", "HINDSIGHT_API_LLM_API_KEY=sk-adopted", "HINDSIGHT_API_LLM_TIMEOUT=120",
+      "HINDSIGHT_API_REFLECT_LLM_PROVIDER=openai", "HINDSIGHT_API_REFLECT_LLM_BASE_URL=http://lfm3-hindsight:8080/v1",
+      "HINDSIGHT_API_REFLECT_LLM_MODEL=lfm3-hindsight-v11", "HINDSIGHT_API_REFLECT_LLM_API_KEY=local", "HINDSIGHT_API_REFLECT_LLM_MAX_CONCURRENT=2",
+      "HINDSIGHT_API_REFLECT_LLM_TIMEOUT=180", "HINDSIGHT_API_REFLECT_MAX_CONTEXT_TOKENS=48000", "HINDSIGHT_API_REFLECT_MAX_COMPLETION_TOKENS=8192"] },
+    Mounts: [{ Type: "volume", Name: "hindsight-data", Destination: "/home/hindsight/.pg0" }],
+    HostConfig: { PortBindings: { "8888/tcp": [{ HostPort: "8888" }], "9999/tcp": [{ HostPort: "9999" }] } },
+  };
+  const llm = {
+    ...container({ state: running, labels: compose, image: "sha256:llama" }),
+    Config: { Image: "ghcr.io/ggml-org/llama.cpp:server-cuda-b12282", Labels: compose, Env: LLM_ENV,
+      Cmd: ["--model", "/models/LFM3-1.7B-Q8_0.gguf", "--lora", "/models/adapter.gguf", "--jinja", "--alias", "lfm3-hindsight-v11", "--host", "0.0.0.0",
+        "--port", "8080", "--n-gpu-layers", "999", "--flash-attn", "on", "--parallel", "2", "--ctx-size", "131072", "--no-kv-unified", "--metrics"] },
+    Mounts: [{ Type: "bind", Source: "C:/Users/me/lfm3/models", Destination: "/models" }],
+    HostConfig: { PortBindings: { "8080/tcp": [{ HostIp: "127.0.0.1", HostPort: "8085" }] },
+      DeviceRequests: [{ Driver: "nvidia", Count: -1, DeviceIDs: null, Capabilities: [["gpu"]] }] },
+  };
+  try {
+    const docker = fakeDocker({ containers: { "hindsight-only-reflect": hindsight, "lfm3-hindsight": llm },
+      imageEnvs: { "sha256:llama": LLM_ENV }, images: { "ghcr.io/ggml-org/llama.cpp:server-cuda-b12282": "sha256:llama" } });
+    const m = dockerManager(docker);
+    const asked = await m.updateService("hindsight");
+    assert.equal(asked.adoptable, true);
+    assert.match(asked.message, /'hindsight-only-reflect' was not created by aih \(docker compose project 'hindsight-only-reflect'\)/);
+
+    const adopted = await m.updateService("hindsight", { adopt: true });
+    assert.equal(adopted.success, true, adopted.message);
+    assert.match(adopted.message, /'hindsight-only-reflect' and 'lfm3-hindsight' adopted and recreated by aih as 'hindsight' and 'hindsight-llm'/);
+    const saved = m.readState().config.hindsight;
+    assert.deepEqual(saved.localLlm, normalizeLocalLlmConfig({ enabled: true, image: "ghcr.io/ggml-org/llama.cpp:server-cuda-b12282", port: 8085,
+      modelsDir: "C:/Users/me/lfm3/models", model: "LFM3-1.7B-Q8_0.gguf", lora: "adapter.gguf", alias: "lfm3-hindsight-v11", gpus: "all",
+      ctxSize: 131072, parallel: 2, extraArgs: "--jinja --n-gpu-layers 999 --flash-attn on --no-kv-unified --metrics",
+      operations: ["reflect"], maxConcurrent: 2, timeout: 180, maxContextTokens: 48000, maxCompletionTokens: 8192 }));
+    assert.equal(saved.containerName, "hindsight");
+    // Routing variables become settings; only the rest stays in the extra file.
+    assert.equal(await readFile(join(home, "hindsight-extra.env"), "utf8"), "HINDSIGHT_API_LLM_TIMEOUT=120\n");
+    const verbs = docker.verbs();
+    assert.ok(verbs.indexOf("run") < verbs.indexOf("rm"), "the data volume is archived before anything is removed");
+    assert.deepEqual(docker.calls.filter(a => a[0] === "stop").map(a => a[1]), ["hindsight-only-reflect", "lfm3-hindsight"]);
+    assert.deepEqual(Object.keys(docker.containers).sort(), ["hindsight", "hindsight-llm"]);
+    assert.ok(!docker.calls.flat().join(" ").includes("sk-"), "no secret on a docker command line");
+  } finally {
+    saveHindsightApiKey("sk-secret");
+  }
+});
+
 
 test("dashboard adopts only on a second consecutive u", async t => {
   const calls = [];
@@ -369,6 +570,33 @@ test("setup shows Hindsight fields only when selected and never renders the key"
   assert.deepEqual(w.hindsightSettings(), {
     config: normalizeHindsightConfig({ apiPort: 18888, llmBaseUrl: "http://host.docker.internal:10100/v1" }), apiKey: "sk-very-secret" });
 });
+
+test("setup: the local LLM step appears with Hindsight, its fields only when on, and the summary checks the slot budget", () => {
+  const w = new ProxySetupWizard({ services: {}, config: { startServices: ["hindsight", "proxy"] } }, { keyStatus: "file" });
+  const keys = () => w.fields.map(f => f.key);
+  assert.ok(keys().includes("hindsightLocalEnabled"));
+  assert.ok(!keys().includes("hindsightLocalModel"), "hidden while off");
+  assert.equal(w.hindsightSettings().config.localLlm.enabled, false);
+  w.step = keys().indexOf("hindsightLocalEnabled");
+  w.handle(" ");
+  assert.equal(w.draft.hindsightLocalEnabled, "on");
+  w.handle("\r");
+  assert.equal(w.error, "", "an incomplete local LLM does not block moving through its fields");
+  w.step = keys().indexOf("hindsightLocalOperations");
+  w.handle("\x1b[B");
+  w.handle(" ");
+  assert.equal(w.draft.hindsightLocalOperations, "reflect,retain");
+  Object.assign(w.draft, { hindsightLocalModelsDir: "C:/models", hindsightLocalModel: "base.gguf", hindsightLocalCtxSize: "32768" });
+  assert.throws(() => w.validate(), /exceed the 32768 tokens/);
+  w.draft.hindsightLocalCtxSize = "65536";
+  const { localLlm } = w.hindsightSettings().config;
+  assert.deepEqual([localLlm.enabled, localLlm.model, localLlm.operations], [true, "base.gguf", ["reflect", "retain"]]);
+  w.step = w.fields.length;
+  const summary = w.lines(140, 80).join("\n");
+  assert.match(summary, /\* Local LLM for Hindsight: on \(previous: off\)/);
+  assert.match(summary, /started before Hindsight and stopped after it/);
+});
+
 
 test("dashboard forwards Hindsight settings and runs Docker preflight on check", async t => {
   const calls = [];

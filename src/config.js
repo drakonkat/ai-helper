@@ -42,6 +42,18 @@ export const SERVICES = {
     defaultUrl: "http://localhost:9999",
     ports: [],
   },
+  "hindsight-llm": {
+    id: "hindsight-llm",
+    name: "hindsight-llm",
+    // Optional: listed only when the Hindsight local LLM is enabled. Started and stopped with hindsight.
+    runtime: "docker",
+    command: "docker container hindsight-llm",
+    repositoryUrl: "https://github.com/ggml-org/llama.cpp",
+    description: "Local LLM for Hindsight (llama.cpp server in Docker; API :8085; enable it in setup)",
+    defaultPort: 8085,
+    defaultUrl: "http://localhost:8085",
+    ports: [],
+  },
   headroom: {
     id: "headroom",
     name: "headroom",

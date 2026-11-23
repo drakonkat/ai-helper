@@ -12,7 +12,10 @@ import { configureCodexForProxy } from "./codex-routing.js";
 import {
   HINDSIGHT_DEFAULTS,
   HINDSIGHT_REPOSITORY,
+  HINDSIGHT_NETWORK,
+  LOCAL_LLM_ID,
   adoptedHindsightSettings,
+  adoptedLocalLlmSettings,
   describeHealth,
   dockerInfo,
   dockerLogged,
@@ -21,11 +24,16 @@ import {
   hindsightUrls,
   imageId,
   inspectContainer,
+  localLlmConfigHash,
+  localLlmRunArgs,
+  localLlmUrls,
   normalizeHindsightConfig,
   probeHindsightHealth,
+  probeLocalLlmHealth,
   readHindsightApiKey,
   requiresApiKey,
   saveHindsightApiKey,
+  smokeTestLocalLlm,
   validateHindsightApiKey,
   HINDSIGHT_KEY_ENV,
   dockerError,
@@ -44,13 +52,19 @@ import {
 import { formatBytes, formatUptime, gray, red, yellow, green, cyan } from "./utils/format.js";
 
 const isDocker = id => SERVICES[id]?.runtime === "docker";
+const LLM_DISABLED = "The Hindsight local LLM is disabled; enable it in 'aih status --ui' (c), Hindsight local LLM step.";
 
 export class ServiceManager {
   updatesInProgress = new Set();
   /** Injectable for tests: (cmd, args, timeoutMs) => { exitCode, stdout, stderr }. */
   runDocker = execCommand;
   probeHealth = probeHindsightHealth;
+  probeLlmHealth = probeLocalLlmHealth;
+  smokeTestLlm = smokeTestLocalLlm;
+  fileExists = existsSync;
   hindsightStartTimeoutMs = 180000;
+  /** Loading a model into GPU memory can take minutes on first start. */
+  localLlmStartTimeoutMs = 300000;
   hindsightPollMs = 1000;
   dockerRetryAt = 0;
 
@@ -185,8 +199,12 @@ export class ServiceManager {
     state.services ||= {};
     // agentmemory was replaced by Hindsight; never manage or stop a leftover entry.
     delete state.services.agentmemory;
+    // The local LLM row exists only while it is enabled.
+    const localLlm = state.config?.hindsight?.localLlm?.enabled === true;
+    if (!localLlm) delete state.services[LOCAL_LLM_ID];
 
     for (const id of SERVICE_IDS) {
+      if (id === LOCAL_LLM_ID && !localLlm) continue;
       const def = SERVICES[id];
       if (!state.services[id]) {
         state.services[id] = {
@@ -260,12 +278,12 @@ export class ServiceManager {
   async syncDockerService(state, id) {
     const svc = state.services[id] || {};
     const config = this.hindsightConfig(state);
-    const urls = hindsightUrls(config);
+    const target = this.dockerTarget(id, config);
     let container = null;
     let runtimeError;
     if (Date.now() < this.dockerRetryAt) runtimeError = svc.runtimeError || "Docker not available";
     else {
-      try { container = await inspectContainer(config.containerName, this.runDocker); }
+      try { container = await inspectContainer(target.containerName, this.runDocker); }
       catch (error) {
         runtimeError = error.message;
         // A stopped Docker Desktop must not stall every one-second dashboard refresh.
@@ -275,10 +293,10 @@ export class ServiceManager {
     if (!runtimeError) this.dockerRetryAt = 0;
     const next = {
       id, name: SERVICES[id].name, runtime: "docker",
-      command: `docker container ${config.containerName} (${container?.image || config.image})`,
+      command: `docker container ${target.containerName} (${container?.image || target.image})`,
       status: container?.running ? "running" : "stopped",
       startedAt: container?.running ? container.startedAt : undefined,
-      url: urls.ui, apiUrl: urls.api, containerName: config.containerName,
+      url: target.url, apiUrl: target.apiUrl, containerName: target.containerName,
       containerId: container?.id, containerStatus: container ? container.status : runtimeError ? undefined : "missing",
       managed: container ? container.managed : undefined, runtimeError,
     };
@@ -476,28 +494,65 @@ export class ServiceManager {
     };
   }
 
-  /** Starts (or creates) the Hindsight container and reports success only after /health. */
+  /** Container name and URLs of a Docker service. */
+  dockerTarget(id, config) {
+    if (id === LOCAL_LLM_ID) {
+      const urls = localLlmUrls(config.localLlm);
+      return { containerName: config.localLlm.containerName, image: config.localLlm.image, url: urls.ui, apiUrl: urls.api };
+    }
+    const urls = hindsightUrls(config);
+    return { containerName: config.containerName, image: config.image, url: urls.ui, apiUrl: urls.api };
+  }
+
+  /**
+   * Starts (or creates) a Docker service and reports success only after /health.
+   * Hindsight starts its local LLM first, when enabled: the operations routed to it need it.
+   */
   async startDockerService(id) {
     const state = this.readState();
     let config;
     try { config = this.hindsightConfig(state, { strict: true }); }
     catch (error) { return { success: false, message: `Invalid Hindsight settings: ${error.message}. Fix them with 'aih status --ui' (c).` }; }
+    const llmEnabled = config.localLlm.enabled;
+    if (id === LOCAL_LLM_ID && !llmEnabled) return { success: false, message: LLM_DISABLED };
     const urls = hindsightUrls(config);
     const base = { url: urls.ui, apiUrl: urls.api, containerName: config.containerName };
     const docker = await dockerInfo(this.runDocker);
     if (!docker.available) return { ...base, success: false, message: `Docker is not available (${docker.error}). Start Docker Desktop and retry.` };
     this.dockerRetryAt = 0;
+    if (id === LOCAL_LLM_ID) {
+      const result = await this.startLocalLlm(config);
+      await this.syncState();
+      return result;
+    }
     const key = readHindsightApiKey();
     const configHash = hindsightConfigHash(config, key.key);
     let container;
     try { container = await inspectContainer(config.containerName, this.runDocker, 10000); }
     catch (error) { return { ...base, success: false, message: `Cannot inspect the Hindsight container: ${error.message}` }; }
+    if (!container?.running) {
+      // Two Hindsight servers on one database corrupt it: never start next to a foreign one.
+      const [rival] = await this.foreignOnVolume(config, { running: true });
+      if (rival) {
+        const project = rival.container.composeProject ? `, compose project '${rival.container.composeProject}'` : "";
+        return { ...base, success: false, message: `Container '${rival.name}' (not created by aih${project}) is running on data volume '${config.volume}'. Stop it, or adopt it with 'aih update hindsight --adopt'.` };
+      }
+    }
+    let llm = null;
+    if (llmEnabled) {
+      llm = await this.startLocalLlm(config);
+      if (!llm.success) {
+        await this.syncState();
+        return { ...base, success: false, localLlm: llm, message: `${llm.message} Hindsight was not started.` };
+      }
+    }
+    const withLlm = message => llm ? `${message} | local LLM: ${describeHealth(llm.health)}` : message;
     if (container?.running) {
       const health = await this.probeHealth(urls.api);
       await this.syncState();
       const pending = container.managed && container.configHash !== configHash ? " Saved settings differ: restart it to apply them." : "";
-      return { ...base, success: true, alreadyRunning: true, containerId: container.id, health,
-        message: `Hindsight container '${config.containerName}' already running | health: ${describeHealth(health)}.${pending}` };
+      return { ...base, success: true, alreadyRunning: true, containerId: container.id, health, localLlm: llm,
+        message: withLlm(`Hindsight container '${config.containerName}' already running | health: ${describeHealth(health)}.${pending}`) };
     }
     let action;
     if (container?.managed && container.configHash !== configHash) {
@@ -526,37 +581,127 @@ export class ServiceManager {
     const health = await this.waitForHindsight(config);
     const synced = (await this.syncState()).services[id];
     if (health.state !== "healthy") {
-      return { ...base, success: false, containerId: synced?.containerId, health,
+      return { ...base, success: false, containerId: synced?.containerId, health, localLlm: llm,
         message: `Hindsight container ${action}, but /health is ${describeHealth(health)}. Check 'aih logs hindsight'.` };
     }
-    return { ...base, success: true, containerId: synced?.containerId, health,
-      message: `Hindsight container '${config.containerName}' ${action}; health: ${describeHealth(health)}` };
+    return { ...base, success: true, containerId: synced?.containerId, health, localLlm: llm,
+      message: withLlm(`Hindsight container '${config.containerName}' ${action}; health: ${describeHealth(health)}`) };
   }
 
-  /** First boots initialize the database and download models: poll until healthy, exited or timed out. */
-  async waitForHindsight(config) {
-    const deadline = Date.now() + this.hindsightStartTimeoutMs;
-    const api = hindsightUrls(config).api;
+  /** Starts or creates the local LLM container; success only after /health, plus a test completion when it is new. */
+  async startLocalLlm(config) {
+    const llm = config.localLlm;
+    const id = LOCAL_LLM_ID;
+    const name = llm.containerName;
+    const urls = localLlmUrls(llm);
+    const base = { url: urls.ui, apiUrl: urls.api, containerName: name };
+    const configHash = localLlmConfigHash(llm);
+    let container;
+    try { container = await inspectContainer(name, this.runDocker, 10000); }
+    catch (error) { return { ...base, success: false, message: `Cannot inspect the local LLM container: ${error.message}` }; }
+    if (container && !container.managed) {
+      return { ...base, success: false, message: `Container '${name}' was not created by aih: rename or remove it, or adopt the Hindsight stack with 'aih update hindsight --adopt'.` };
+    }
+    if (container?.running) {
+      const health = await this.probeLlmHealth(urls.api);
+      const pending = container.configHash !== configHash ? ` Saved settings differ: restart ${id} to apply them.` : "";
+      return { ...base, success: true, alreadyRunning: true, containerId: container.id, health,
+        message: `Local LLM '${name}' already running | health: ${describeHealth(health)}.${pending}` };
+    }
+    const network = await this.ensureHindsightNetwork();
+    if (!network.success) return { ...base, ...network };
+    let action;
+    if (container && container.configHash !== configHash) {
+      const removed = await dockerLogged(id, ["rm", name], this.runDocker, 60000);
+      if (removed.exitCode !== 0) return { ...base, success: false, message: `Cannot recreate the local LLM container: ${dockerError(removed)}` };
+      container = null;
+      action = "recreated";
+    }
+    if (container) {
+      const started = await dockerLogged(id, ["start", name], this.runDocker, 120000);
+      if (started.exitCode !== 0) return { ...base, success: false, message: `docker start ${name} failed: ${dockerError(started)}. See 'aih logs ${id}'.` };
+      action = "started";
+    } else {
+      const missing = [llm.model, llm.lora].filter(Boolean).map(file => join(llm.modelsDir, file)).filter(path => !this.fileExists(path));
+      if (missing.length) return { ...base, success: false, message: `Local LLM file not found: ${missing.join(", ")}. Fix the models folder in 'aih status --ui' (c).` };
+      if (!(await imageId(llm.image, this.runDocker))) {
+        const pulled = await dockerLogged(id, ["pull", llm.image], this.runDocker, 30 * 60000);
+        if (pulled.exitCode !== 0) return { ...base, success: false, message: `docker pull ${llm.image} failed: ${dockerError(pulled)}` };
+      }
+      const created = await dockerLogged(id, localLlmRunArgs(llm, { configHash }), this.runDocker, 120000, llm.image);
+      if (created.exitCode !== 0) return { ...base, success: false, message: `docker run ${llm.image} failed: ${dockerError(created)}` };
+      action ||= "created";
+    }
+    const health = await this.waitForContainerHealth(name, () => this.probeLlmHealth(urls.api), this.localLlmStartTimeoutMs);
+    if (health.state !== "healthy") {
+      return { ...base, success: false, health, message: `Local LLM container ${action}, but /health is ${describeHealth(health)}. Check 'aih logs ${id}'.` };
+    }
+    if (action !== "started") {
+      // A new image or new settings: prove that the model and adapter generate, not only that the server is up.
+      const smoke = await this.smokeTestLlm(urls.api, llm.alias);
+      if (!smoke.ok) return { ...base, success: false, health, message: `Local LLM ${action} and healthy, but a test completion failed (${smoke.error}). Check 'aih logs ${id}'.` };
+    }
+    return { ...base, success: true, health, message: `Local LLM '${name}' ${action}; health: ${describeHealth(health)}` };
+  }
+
+  /** The user-defined network on which Hindsight reaches the local LLM by container name. */
+  async ensureHindsightNetwork() {
+    const found = await this.runDocker("docker", ["network", "inspect", "--format", "{{.Name}}", HINDSIGHT_NETWORK], 10000);
+    if (found.exitCode === 0) return { success: true };
+    const created = await dockerLogged(LOCAL_LLM_ID, ["network", "create", HINDSIGHT_NETWORK], this.runDocker, 30000);
+    return created.exitCode === 0 ? { success: true }
+      : { success: false, message: `Cannot create the Docker network '${HINDSIGHT_NETWORK}': ${dockerError(created)}` };
+  }
+
+  /** First boots initialize the database, download or load models: poll until healthy, exited or timed out. */
+  async waitForContainerHealth(name, probe, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
     for (let attempt = 0; ; attempt++) {
-      const health = await this.probeHealth(api);
+      const health = await probe();
       if (health.state === "healthy" || Date.now() >= deadline) return health;
       if (attempt % 5 === 4) {
-        const container = await inspectContainer(config.containerName, this.runDocker).catch(() => null);
+        const container = await inspectContainer(name, this.runDocker).catch(() => null);
         if (!container?.running) return { ...health, state: "unreachable", error: `container ${container?.status || "missing"}` };
       }
       await sleep(this.hindsightPollMs);
     }
   }
 
+  async waitForHindsight(config) {
+    return this.waitForContainerHealth(config.containerName, () => this.probeHealth(hindsightUrls(config).api), this.hindsightStartTimeoutMs);
+  }
+
+  /** Containers not created by aih that mount the Hindsight data volume (only running ones if asked). */
+  async foreignOnVolume(config, { running = false } = {}) {
+    const listed = await this.runDocker("docker", ["ps", "-a", "--filter", "volume=" + config.volume, "--format", "{{.Names}}"], 10000);
+    if (listed.exitCode !== 0) return [];
+    const found = [];
+    for (const name of listed.stdout.split(/\r?\n/).map(line => line.trim()).filter(line => line && line !== config.containerName)) {
+      const container = await inspectContainer(name, this.runDocker, 10000).catch(() => null);
+      if (container && !container.managed && (!running || container.running)) found.push({ name, container });
+    }
+    return found;
+  }
+
   async stopDockerService(id) {
     const config = this.hindsightConfig();
-    // Never kill port owners: on Windows they are Docker Desktop's own processes.
-    const result = await dockerLogged(id, ["stop", config.containerName], this.runDocker, 60000);
-    await this.syncState();
-    if (result.exitCode !== 0 && !/no such container/i.test(result.stderr)) {
-      return { success: false, message: `docker stop ${config.containerName} failed: ${dockerError(result)}` };
+    const llm = config.localLlm;
+    // Hindsight first, then the server it calls. Never kill port owners: on Windows they are Docker Desktop's own processes.
+    const names = id === LOCAL_LLM_ID ? [llm.containerName] : [config.containerName, ...(llm.enabled ? [llm.containerName] : [])];
+    for (const name of names) {
+      const result = await dockerLogged(id, ["stop", name], this.runDocker, 60000);
+      if (result.exitCode !== 0 && !/no such container/i.test(result.stderr)) {
+        await this.syncState();
+        return { success: false, message: `docker stop ${name} failed: ${dockerError(result)}` };
+      }
     }
-    return { success: true, message: `Hindsight container '${config.containerName}' stopped (data kept)` };
+    const state = await this.syncState();
+    if (id === LOCAL_LLM_ID) {
+      const warning = state.services.hindsight?.status === "running"
+        ? `; Hindsight is still running and its ${llm.operations.join(", ")} calls fail until the local LLM is started again` : "";
+      return { success: true, warning: Boolean(warning), message: `Local LLM '${llm.containerName}' stopped${warning}` };
+    }
+    return { success: true, message: `Hindsight container '${config.containerName}' stopped (data kept)${llm.enabled ? `; local LLM '${llm.containerName}' stopped` : ""}` };
   }
 
   /**
@@ -567,14 +712,18 @@ export class ServiceManager {
     if (this.updatesInProgress.has(id)) return { success: false, message: `An update for '${id}' is already in progress` };
     this.updatesInProgress.add(id);
     try {
+      if (id === LOCAL_LLM_ID) return await this.updateLocalLlm(id);
       const config = this.hindsightConfig(this.readState(), { strict: true });
       const name = config.containerName;
       const docker = await dockerInfo(this.runDocker);
       if (!docker.available) return { success: false, message: `Docker is not available (${docker.error}). Start Docker Desktop and retry.` };
       const container = await inspectContainer(name, this.runDocker, 10000);
-      if (container && !container.managed) {
-        if (adopt) return await this.adoptDockerService(id, name, container);
-        return { success: false, adoptable: true, message: `Container '${name}' was not created by aih${container.composeProject ? ` (docker compose project '${container.composeProject}')` : ""}. To adopt it run 'aih update ${id} --adopt' (dashboard: press u again): aih imports its settings and recreates it on the same data volume.` };
+      // A foreign container with aih's name, or a running one on the same data (e.g. a compose stack under other names).
+      const foreign = container && !container.managed ? { name, container } : (await this.foreignOnVolume(config, { running: true }))[0];
+      if (foreign) {
+        if (adopt) return await this.adoptDockerService(id, foreign.name, foreign.container, config);
+        const project = foreign.container.composeProject ? ` (docker compose project '${foreign.container.composeProject}')` : "";
+        return { success: false, adoptable: true, message: `Container '${foreign.name}' was not created by aih${project}. To adopt it run 'aih update ${id} --adopt' (dashboard: press u again): aih imports its settings, and those of the local LLM container it calls, and recreates them on the same data volume.` };
       }
       const previousVersion = container?.running ? (await this.probeHealth(hindsightUrls(config).api)).version ?? null : null;
       // A release tag of the official image moves to the latest GitHub release; any other tag is pulled again.
@@ -647,40 +796,134 @@ export class ServiceManager {
     return { success: true, path: join(dir, file) };
   }
 
-  /** Takes over a container aih did not create: imports its settings, then recreates it on the same volume. */
-  async adoptDockerService(id, name, container) {
-    const refuse = reason => ({ success: false, message: `Cannot adopt container '${name}': ${reason}. Nothing was changed.` });
-    // Variables already defined by the image are not settings: importing them would pin them across updates.
-    const imageEnv = await this.runDocker("docker", ["image", "inspect", "--format", "{{json .Config.Env}}", container.imageId], 10000);
-    if (imageEnv.exitCode !== 0) return refuse(dockerError(imageEnv));
-    let adopted;
-    try { adopted = adoptedHindsightSettings(name, container, JSON.parse(imageEnv.stdout) || []); }
-    catch (error) { return refuse(error.message); }
-    if (!adopted.key && !readHindsightApiKey().key && requiresApiKey(adopted.config)) {
-      return refuse(`it has no LLM API key for provider '${adopted.config.llmProvider}'; save one in setup (c) first`);
+  /**
+   * The llama.cpp build is pinned and changed by hand (image tag in setup). u pulls the same tag again and
+   * replaces the container only if the image changed, going back to the previous image if the new one fails.
+   */
+  async updateLocalLlm(id) {
+    const config = this.hindsightConfig(this.readState(), { strict: true });
+    const llm = config.localLlm;
+    if (!llm.enabled) return { success: false, message: LLM_DISABLED };
+    const docker = await dockerInfo(this.runDocker);
+    if (!docker.available) return { success: false, message: `Docker is not available (${docker.error}). Start Docker Desktop and retry.` };
+    const name = llm.containerName;
+    const container = await inspectContainer(name, this.runDocker, 10000);
+    if (container && !container.managed) return { success: false, message: `Container '${name}' was not created by aih; adopt the Hindsight stack with 'aih update hindsight --adopt'.` };
+    const pinned = "The llama.cpp build is pinned: to move to another build, change the local LLM image tag in 'aih status --ui' (c).";
+    const pulled = await dockerLogged(id, ["pull", llm.image], this.runDocker, 30 * 60000);
+    if (pulled.exitCode !== 0) return { success: false, message: `docker pull ${llm.image} failed: ${dockerError(pulled)}` };
+    const image = await imageId(llm.image, this.runDocker);
+    if (!container) return { success: true, updated: true, message: `Image ${llm.image} pulled; the container is created on the next start. ${pinned}` };
+    if (image && image === container.imageId) {
+      return { success: true, updated: false, alreadyUpToDate: true, message: `'${id}' already uses the latest ${llm.image}. ${pinned}` };
     }
-    const envFile = adopted.extra.length ? join(getAihDir(), "hindsight-extra.env") : "";
-    if (envFile) {
-      ensureDir(getAihDir());
-      writeFileSync(envFile, adopted.extra.join("\n") + "\n", { encoding: "utf8", mode: 0o600 });
-    }
-    this.saveHindsightConfiguration({ config: { ...adopted.config, envFile }, apiKey: adopted.key });
+    // The container keeps no data: no backup, and the previous image stays local for a rollback.
     const stopped = await dockerLogged(id, ["stop", name], this.runDocker, 60000);
     const removed = stopped.exitCode === 0 ? await dockerLogged(id, ["rm", name], this.runDocker, 60000) : stopped;
     if (removed.exitCode !== 0) {
       if (container.running) await dockerLogged(id, ["start", name], this.runDocker, 120000);
       await this.syncState();
-      return { success: false, message: `Settings imported, but the container could not be replaced: ${dockerError(removed)}` };
+      return { success: false, message: `Cannot replace the local LLM container: ${dockerError(removed)}; the current container is kept` };
     }
-    const kept = `data volume '${adopted.config.volume}' kept`;
     if (!container.running) {
       await this.syncState();
-      return { success: true, adopted: true, message: `Container '${name}' adopted; aih recreates it on the next start (${kept})` };
+      return { success: true, updated: true, restarted: false, message: `Image ${llm.image} updated; the container is recreated on the next start` };
+    }
+    const started = await this.startLocalLlm(config);
+    if (started.success) {
+      await this.syncState();
+      return { ...started, updated: true, restarted: true, message: `'${id}' updated to the new ${llm.image} and restarted (${describeHealth(started.health)})` };
+    }
+    await dockerLogged(id, ["rm", "-f", name], this.runDocker, 60000);
+    const tagged = await dockerLogged(id, ["tag", container.imageId, llm.image], this.runDocker, 30000);
+    const restored = tagged.exitCode === 0 ? await this.startLocalLlm(config) : { success: false, message: dockerError(tagged) };
+    await this.syncState();
+    return { success: false, updated: false, rolledBack: restored.success,
+      message: `The new ${llm.image} failed (${started.message}); ${restored.success ? "rolled back to the previous image" : `rollback failed: ${restored.message}`}` };
+  }
+
+  /**
+   * Takes over a container aih did not create, and the local LLM container it calls, if any: imports
+   * their settings, archives the data volume, then recreates them under aih's names on the same volume.
+   */
+  async adoptDockerService(id, name, container, current = this.hindsightConfig()) {
+    const refuse = reason => ({ success: false, message: `Cannot adopt container '${name}': ${reason}. Nothing was changed.` });
+    // Variables already defined by an image are not settings: importing them would pin them across updates.
+    const imageEnv = async image => {
+      const result = await this.runDocker("docker", ["image", "inspect", "--format", "{{json .Config.Env}}", image], 10000);
+      if (result.exitCode !== 0) throw new Error(dockerError(result));
+      return JSON.parse(result.stdout) || [];
+    };
+    let adopted;
+    let config;
+    let llmName = null;
+    let llmContainer = null;
+    try {
+      adopted = adoptedHindsightSettings(current.containerName, container, await imageEnv(container.imageId));
+      let localLlm = { ...current.localLlm, enabled: false };
+      if (adopted.route) {
+        llmName = adopted.route.host;
+        llmContainer = await inspectContainer(llmName, this.runDocker, 10000);
+        if (!llmContainer) throw new Error(`its ${adopted.route.operations.join(", ")} calls go to '${llmName}', which is not a container`);
+        localLlm = adoptedLocalLlmSettings(llmContainer, await imageEnv(llmContainer.imageId), adopted.route, current.localLlm.containerName);
+      }
+      config = normalizeHindsightConfig({ ...adopted.config, localLlm });
+    } catch (error) { return refuse(error.message); }
+    if (!adopted.key && !readHindsightApiKey().key && requiresApiKey(config)) {
+      return refuse(`it has no LLM API key for provider '${config.llmProvider}'; save one in setup (c) first`);
+    }
+    // aih's names must be free, or belong to stopped aih containers that are replaced.
+    const adopting = [name, ...(llmName ? [llmName] : [])];
+    const stale = [];
+    for (const target of [config.containerName, ...(llmName ? [config.localLlm.containerName] : [])].filter(t => !adopting.includes(t))) {
+      let existing;
+      try { existing = await inspectContainer(target, this.runDocker, 10000); } catch (error) { return refuse(error.message); }
+      if (!existing) continue;
+      if (!existing.managed) return refuse(`the name '${target}' is taken by another container not created by aih`);
+      if (existing.running) return refuse(`aih's container '${target}' is running; stop it first`);
+      stale.push(target);
+    }
+    const wasRunning = { [name]: container.running, ...(llmName ? { [llmName]: llmContainer.running } : {}) };
+    const restore = async () => {
+      for (const target of [...adopting].reverse()) if (wasRunning[target]) await dockerLogged(id, ["start", target], this.runDocker, 120000);
+      await this.syncState();
+    };
+    // Hindsight first, then its LLM; the archive needs a quiet database.
+    for (const target of adopting) {
+      const stopped = await dockerLogged(id, ["stop", target], this.runDocker, 60000);
+      if (stopped.exitCode !== 0) { await restore(); return refuse(`docker stop ${target} failed: ${dockerError(stopped)}`); }
+    }
+    const backup = await this.backupHindsightVolume(id, config.volume, container.imageId);
+    if (!backup.success) { await restore(); return refuse(`data backup failed: ${backup.message}`); }
+    const envFile = adopted.extra.length ? join(getAihDir(), "hindsight-extra.env") : "";
+    if (envFile) {
+      ensureDir(getAihDir());
+      writeFileSync(envFile, adopted.extra.join("\n") + "\n", { encoding: "utf8", mode: 0o600 });
+    }
+    this.saveHindsightConfiguration({ config: { ...config, envFile }, apiKey: adopted.key });
+    const removed = await dockerLogged(id, ["rm", name], this.runDocker, 60000);
+    if (removed.exitCode !== 0) {
+      await restore();
+      return { success: false, message: `Settings imported, but the container could not be replaced: ${dockerError(removed)}` };
+    }
+    const leftovers = [];
+    for (const target of [...adopting.slice(1), ...stale]) {
+      const result = await dockerLogged(id, ["rm", target], this.runDocker, 60000);
+      if (result.exitCode !== 0) leftovers.push(`${target} (${dockerError(result)})`);
+    }
+    const what = llmName ? `Containers '${name}' and '${llmName}'` : `Container '${name}'`;
+    const names = llmName ? `'${config.containerName}' and '${config.localLlm.containerName}'` : `'${config.containerName}'`;
+    const kept = `data volume '${config.volume}' kept, backup ${backup.path}`;
+    const notes = (leftovers.length ? ` Could not remove: ${leftovers.join(", ")}.` : "")
+      + (container.composeProject ? ` Do not run 'docker compose up' for project '${container.composeProject}' again: it would start a second Hindsight on the same data.` : "");
+    if (!container.running) {
+      await this.syncState();
+      return { success: true, adopted: true, backup: backup.path, message: `${what} adopted; aih creates ${names} on the next start (${kept}).${notes}` };
     }
     const started = await this.startDockerService(id);
-    return { ...started, adopted: true, message: started.success
-      ? `Container '${name}' adopted and recreated by aih (${kept}; ${describeHealth(started.health)}). Update it with u or 'aih update ${id}'.`
-      : `Settings imported and old container removed, but the new one failed: ${started.message}` };
+    return { ...started, adopted: true, backup: backup.path, message: started.success
+      ? `${what} adopted and recreated by aih as ${names} (${kept}; ${describeHealth(started.health)}).${notes} Update with u or 'aih update ${id}'.`
+      : `Settings imported and old containers removed, but the new ones failed: ${started.message}${notes}` };
   }
 
   /** Non-secret settings go to state.json; the key only to ~/.aih/hindsight.env. */
@@ -696,21 +939,35 @@ export class ServiceManager {
     return normalized;
   }
 
-  /** Applies saved settings to a running aih-managed container by recreating it. */
+  /** Applies saved settings to running aih-managed containers by recreating them; a disabled local LLM is stopped. */
   async applyHindsightConfiguration() {
     const config = this.hindsightConfig(this.readState());
+    const llm = config.localLlm;
     let container;
-    try { container = await inspectContainer(config.containerName, this.runDocker, 10000); }
-    catch (error) { return { success: true, warning: true, message: `Hindsight settings saved; Docker not available (${error.message})` }; }
-    if (!container?.running) return { success: true, message: "Hindsight settings saved for its next start" };
-    if (!container.managed) {
-      return { success: true, warning: true, message: `Hindsight settings saved; container '${config.containerName}' was not created by aih and is left unchanged (adopt it with u on the dashboard)` };
+    let llmContainer;
+    try {
+      container = await inspectContainer(config.containerName, this.runDocker, 10000);
+      llmContainer = await inspectContainer(llm.containerName, this.runDocker, 10000);
+    } catch (error) { return { success: true, warning: true, message: `Hindsight settings saved; Docker not available (${error.message})` }; }
+    const orphan = !llm.enabled && llmContainer?.managed && llmContainer.running;
+    if (orphan) await dockerLogged(LOCAL_LLM_ID, ["stop", llm.containerName], this.runDocker, 60000);
+    const note = orphan ? `; local LLM '${llm.containerName}' stopped (disabled)` : "";
+    if (!container?.running) {
+      if (orphan) await this.syncState();
+      return { success: true, message: `Hindsight settings saved for its next start${note}` };
     }
-    if (container.configHash === hindsightConfigHash(config, readHindsightApiKey().key)) return { success: true, message: "Hindsight unchanged" };
+    if (!container.managed) {
+      return { success: true, warning: true, message: `Hindsight settings saved; container '${config.containerName}' was not created by aih and is left unchanged (adopt it with u on the dashboard)${note}` };
+    }
+    const llmChanged = llm.enabled && (!llmContainer?.running || (llmContainer.managed && llmContainer.configHash !== localLlmConfigHash(llm)));
+    if (container.configHash === hindsightConfigHash(config, readHindsightApiKey().key) && !llmChanged) {
+      if (orphan) await this.syncState();
+      return { success: true, message: `Hindsight unchanged${note}` };
+    }
     const stopped = await this.stopDockerService("hindsight");
     if (!stopped.success) return stopped;
     const started = await this.startDockerService("hindsight");
-    return { ...started, message: started.success ? `Hindsight recreated with the new settings (${describeHealth(started.health)})` : started.message };
+    return { ...started, message: started.success ? `Hindsight recreated with the new settings (${describeHealth(started.health)})${note}` : started.message };
   }
 
   async startProxyService(options) {
@@ -978,12 +1235,12 @@ export class ServiceManager {
    */
   async showLogs(serviceId, lines = 50, follow = false) {
     if (isDocker(serviceId)) {
-      const config = this.hindsightConfig();
+      const { containerName } = this.dockerTarget(serviceId, this.hindsightConfig());
       const logPath = getServiceLogPath(serviceId);
       if (existsSync(logPath)) console.log(gray(`[aih] Docker commands run by aih are logged in: ${logPath}`));
-      console.log(gray(`[aih] docker logs --tail ${lines}${follow ? " --follow" : ""} ${config.containerName}\n`));
+      console.log(gray(`[aih] docker logs --tail ${lines}${follow ? " --follow" : ""} ${containerName}\n`));
       await new Promise(resolve => {
-        const child = spawn("docker", ["logs", "--tail", String(lines), ...(follow ? ["--follow"] : []), config.containerName],
+        const child = spawn("docker", ["logs", "--tail", String(lines), ...(follow ? ["--follow"] : []), containerName],
           { stdio: "inherit", windowsHide: true });
         child.once("error", error => { console.log(red(`[aih] Cannot run docker logs: ${error.message}`)); resolve(); });
         child.once("exit", resolve);
